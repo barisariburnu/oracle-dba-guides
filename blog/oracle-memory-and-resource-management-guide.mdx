@@ -1,0 +1,90 @@
+---
+title: "Oracle Bellek ve Kaynak Yönetimi: SGA, PGA ve Resource Manager"
+description: "Oracle veritabanında bellek yönetimi (SGA, PGA), Undo yönetimi ve Resource Manager ile kullanıcı bazlı kaynak (CPU, Paralellik) limitleme."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Memory Management", "SGA", "PGA", "Undo", "Resource Manager", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Bellek ve Kaynak Yönetimi: SGA, PGA ve Resource Manager
+
+Bir Oracle veritabanının performansı, donanım kaynaklarının (CPU ve RAM) ne kadar verimli kullanıldığına doğrudan bağlıdır. Yanlış yapılandırılmış bir bellek alanı veya kontrolsüz bir kullanıcı sorgusu, tüm sistemin kilitlenmesine yol açabilir. Bu makalede, Oracle'ın bellek yapılarını (SGA/PGA) ve iş yükü yönetimini (Resource Manager) nasıl optimize edebileceğimizi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Undotbs Yönetimi ve "Snapshot Too Old"
+
+Undo tablespace, verilerin eski hallerini (Read Consistency) ve işlem geri almayı (Rollback) yönetir. Uzun süren sorguların `ORA-01555: snapshot too old` hatası alması, genellikle yetersiz undo alanından veya düşük `undo_retention` süresinden kaynaklanır.
+
+### Undo İstatistiklerini İzleme
+```sql
+SELECT TO_CHAR(BEGIN_TIME, 'HH24:MI:SS') AS BEGIN,
+       UNXPSTEALCNT AS "Unexpired Stolen", -- Henüz süresi dolmamış alanların zorla alınması (Kritik!)
+       SSOLDERRCNT AS "Snapshot Too Old Errors",
+       NOSPACERRCNT AS "Out of Space Errors"
+FROM V$UNDOSTAT
+WHERE SSOLDERRCNT > 0 OR NOSPACERRCNT > 0;
+```
+
+---
+
+## 2. PGA (Program Global Area) Boyutlandırma
+
+PGA, her kullanıcı oturumu için özel olan bellek alanıdır (Sort ve Hash işlemleri burada yapılır). PGA'nın yetersiz olması, işlemlerin diske (Temporary Tablespace) taşmasına ve yavaşlamasına neden olur.
+
+### PGA Tavsiyesi (Advice)
+Oracle'ın mevcut PGA boyutuna göre ne kadar performans kazanacağınızı tahmin eden görünümü:
+
+```sql
+SELECT inst_id,
+       round(pga_target_for_estimate/1024/1024) as target_size_MB,
+       estd_pga_cache_hit_percentage as cache_hit_pct,
+       estd_overalloc_count as overalloc_count
+FROM gv$pga_target_advice 
+ORDER BY target_size_mb;
+```
+*Not: `Cache Hit %` %100'e ne kadar yakınsa, diske o kadar az taşma yapılıyor demektir.*
+
+---
+
+## 3. Oracle Resource Manager ile Kaynak Sınırlandırma
+
+Bir kullanıcının yanlışlıkla başlattığı devasa bir sorgunun tüm CPU'yu tüketmesini istemezsiniz. Resource Manager ile her kullanıcı grubuna belirli limitler koyabiliriz.
+
+### Örnek: Paralel Sorgu Sayısını Sınırlama
+```sql
+BEGIN
+  -- 1. Tüketici Grubu Oluştur
+  DBMS_RESOURCE_MANAGER.CREATE_CONSUMER_GROUP('REPORTING_GROUP', 'Group for high-load reports');
+  
+  -- 2. Plan Oluştur ve Paralellik Limiti Koy
+  DBMS_RESOURCE_MANAGER.CREATE_PLAN_DIRECTIVE(
+    plan => 'MY_DB_PLAN',
+    group_or_subplan => 'REPORTING_GROUP',
+    parallel_degree_limit_p1 => 2 -- Maksimum 2 paralel işlem izni
+  );
+END;
+/
+```
+
+---
+
+## 4. SGA ve Shared Pool Takibi
+
+Shared Pool içindeki alanın büyük bir bölümü SQL kodlarının saklanması (Library Cache) için kullanılır. "Fragmentasyon" olup olmadığını şu sorguyla görebiliriz:
+
+```sql
+SELECT name, ROUND(bytes/1024/1024, 2) AS MB
+FROM v$sgastat 
+WHERE pool = 'shared pool' 
+AND (name LIKE '%free memory%' OR name LIKE '%library cache%');
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **ASMM (Automatic Shared Memory Management):** Mümkünse `SGA_TARGET` kullanarak bellek yönetimini Oracle'a bırakın.
+-   **Undo Retention:** Eğer çok fazla `ORA-01555` hatası alıyorsanız, `undo_retention` parametresini en uzun sorgu sürenize göre artırın.
+-   **PGA Overalloc:** Eğer `estd_overalloc_count` sıfırdan büyükse, `PGA_AGGREGATE_TARGET` değerini kesinlikle artırmalısınız.
+
+Doğru bellek ve kaynak yönetimi, donanım yatırımınızdan maksimum verim almanızı sağlar.

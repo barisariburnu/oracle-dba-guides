@@ -1,0 +1,78 @@
+---
+title: "Oracle Tablo ve Segment Boyut Analizi: En Çok Yer Kaplayan Objeler"
+description: "Oracle veritabanında tablo, indeks ve partisyon boyutlarını analiz etme, en hızlı büyüyen objeleri tespit etme ve dba_segments kullanımı."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Segment Analysis", "Table Size", "DBA", "Space Management"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Tablo ve Segment Boyut Analizi
+
+Veritabanı büyüdükçe, diskin nereye harcandığını anlamak zorlaşır. Bir tablespace dolu olabilir, ancak bu doluluğa hangi tablo veya indeksin neden olduğunu bilmek, aksiyon almak (arşivleme, sıkıştırma vb.) için ilk adımdır. Oracle'da tüm fiziksel objeler (tablo, indeks, LOB, partisyon) bir **Segment** olarak adlandırılır.
+
+
+<!--truncate-->
+Bu makalede, segment boyutlarını analiz etmek için ihtiyacınız olan temel sorguları inceleyeceğiz.
+
+## 1. Veritabanındaki En Büyük Objeleri Bulma
+
+Veritabanı genelinde en çok yer kaplayan ilk 10 objeyi görmek için:
+
+```sql
+SELECT * FROM (
+  SELECT owner, segment_name, segment_type, tablespace_name, 
+         round(bytes/1024/1024, 2) size_mb
+  FROM dba_segments
+  ORDER BY bytes DESC
+) WHERE ROWNUM <= 10;
+```
+
+---
+
+## 2. Belirli Bir Tablonun Toplam Boyutu (LOB ve İndeksler Dahil)
+
+Bir tablonun sadece kendisi değil, üzerindeki indeksler ve LOB kolonları da yer kaplar. Tablonun kapladığı "gerçek" alanı şu şekilde hesaplayabilirsiniz:
+
+```sql
+SELECT segment_name, segment_type, round(sum(bytes)/1024/1024, 2) size_mb
+FROM dba_segments
+WHERE (segment_name = 'MUSTERI_TABLOSU' OR 
+       segment_name IN (SELECT index_name FROM dba_indexes WHERE table_name = 'MUSTERI_TABLOSU') OR
+       segment_name IN (SELECT segment_name FROM dba_lobs WHERE table_name = 'MUSTERI_TABLOSU'))
+GROUP BY segment_name, segment_type
+ORDER BY 3 DESC;
+```
+
+---
+
+## 3. Partisyon Bazlı Boyut Analizi
+
+Eğer tablonuz partisyonlu ise, her bir parçanın (partition) boyutunu ayrı ayrı görmeniz gerekir:
+
+```sql
+SELECT partition_name, round(bytes/1024/1024, 2) MB
+FROM dba_segments
+WHERE segment_name = 'SATIS_VERILERI'
+  AND segment_type LIKE 'TABLE PARTITION%'
+ORDER BY MB DESC;
+```
+
+---
+
+## 4. Kullanıcı Bazlı Toplam Kota Kullanımı
+
+```sql
+SELECT owner, round(sum(bytes)/1024/1024, 2) total_mb
+FROM dba_segments
+GROUP BY owner
+ORDER BY 2 DESC;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **dba_segments vs dba_tables:** `dba_tables` içindeki `num_rows` ve `blocks` kolonları sadece son istatistik toplama anındaki tahmini verileri verir. **Gerçek** fiziksel boyutu görmek için her zaman `dba_segments` kullanmalısınız.
+-   **LOB Segmentleri:** Tablo adını `dba_segments` içinde aradığınızda LOB verilerini göremezsiniz. LOB'lar `SYS_LOB...` gibi isimlerle saklanır. Bunları tabloyla eşleştirmek için `dba_lobs` görünümünü kullanın.
+-   **Cleanup:** Boyut analizinde çok büyük ve gereksiz indeksler fark ederseniz, bunları `invisible` yapıp test ettikten sonra silebilirsiniz.
+
+Boyut analizi, sadece yer kazanmak için değil, aynı zamanda yedekleme sürelerini ve I/O performansını optimize etmek için de gereklidir.

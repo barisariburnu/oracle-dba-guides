@@ -1,0 +1,130 @@
+---
+title: "Oracle Lock ve Deadlock Tespiti: Oturum ve Kilit Yönetimi"
+description: "Oracle veritabanında lock (kilit) tespiti, blocking session analizi, deadlock (ölümcül kilit) çözümü ve problemli oturumları sonlandırma teknikleri."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Lock", "Deadlock Detection", "Blocking Session", "V$SESSION", "V$LOCKED_OBJECT", "DBA Troubleshooting"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Lock ve Deadlock Tespiti: Kilit Yönetimi Rehberi
+
+Oracle veritabanı gibi çok kullanıcılı sistemlerde, veri bütünlüğünü korumak için **kilitleme (locking)** mekanizması kullanılır. Ancak, bir oturumun kilitlediği kaynağı serbest bırakmaması ("Blocking Session") veya iki oturumun birbirini beklemesi ("Deadlock") sistemlerin durma noktasına gelmesine neden olabilir. Bu makalede, bu kilitlenmeleri nasıl tespit edeceğinizi, hangi nesnelerin kilitlendiğini nasıl bulacağınızı ve kriz anında oturumları nasıl yönetebileceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## Kilit (Lock) Türleri ve Takibi
+
+Oracle'da en yaygın karşılaşılan kilitlenme türü DML (Insert, Update, Delete) kilitleridir. Bir satır güncellendiğinde, işlem commit veya rollback edilene kadar o satır kilitlenir.
+
+### 1. Kilitli Nesneleri ve Sahibi Olan Oturumları Bulma
+Veritabanında şu an hangi tabloda kilit olduğunu ve hangi kullanıcının buna neden olduğunu görmek için:
+
+```sql
+SELECT a.owner, 
+       a.object_name, 
+       b.sid, 
+       b.serial#, 
+       b.username, 
+       b.osuser,
+       b.status
+FROM dba_objects a, v$session b, v$locked_object c
+WHERE a.object_id = c.object_id
+  AND b.sid = c.session_id;
+```
+
+### 2. Bekleyen ve Bekleten (Blocking) Oturum Analizi
+Kayıt ekleme veya güncelleme sırasında bir oturumun başka bir oturumu bekletip bekletmediğini şu sorgu ile saptayabilirsiniz:
+
+```sql
+SELECT s.sid AS "Blocked SID",
+       s.username AS "Wait User",
+       s.blocking_session AS "Blocking SID",
+       s.seconds_in_wait AS "Wait Sec",
+       s.event AS "Wait Event",
+       q.sql_text AS "Waiting SQL"
+FROM gv$session s
+LEFT JOIN gv$sql q ON s.sql_id = q.sql_id
+WHERE s.blocking_session IS NOT NULL;
+```
+
+---
+
+## Deadlock (Ölümcül Kilit) Tespiti
+
+**Deadlock (ORA-00060)**, iki veya daha fazla oturumun, birbirlerinin kilitlediği kaynaklara erişmek istemesi ve sonsuz bir döngüde birbirlerini beklemesi durumudur. Oracle bunu otomatik tespit eder ve bir işlemi iptal eder, ancak DBA'nın kök nedeni bulması gerekir.
+
+### Deadlock Geçmişini Sorgulama (Alert Log Dışında)
+```sql
+-- ASH üzerinden geçmişteki kilitlenmeleri analiz etme
+SELECT sample_time, 
+       session_id, 
+       blocking_session, 
+       event, 
+       sql_id
+FROM v$active_session_history
+WHERE event LIKE 'enq%' 
+  AND sample_time > SYSDATE - 1/24; -- Son 1 saat
+```
+
+---
+
+## Problemli Oturumları Sonlandırma
+
+Acil durumlarda (veya sistem artık cevap vermediğinde), kilitlenmeye neden olan oturumu sonlandırmak gerekebilir.
+
+### 1. Database Seviyesinde Kill (Önerilen)
+```sql
+-- SID ve Serial# bilgilerine göre
+ALTER SYSTEM KILL SESSION 'sid,serial#' IMMEDIATE;
+
+-- RAC (Cluster) ortamında instance ID ile
+ALTER SYSTEM KILL SESSION 'sid,serial#,@inst_id';
+```
+
+### 2. İşletim Sistemi (OS) Seviyesinde Kill
+Eğer session veritabanından düşmüyorsa ("Killed" durumunda kalıyorsa), OS process'ine müdahale edilebilir:
+
+```sql
+-- Önce SPID (System Process ID) bulunur
+SELECT p.spid, s.sid, s.serial#
+FROM v$session s, v$process p
+WHERE s.paddr = p.addr 
+  AND s.sid = :your_sid;
+
+-- Linux terminalinde:
+-- kill -9 <spid>
+```
+
+---
+
+## Gelişmiş Filtreleme Teknikleri
+
+### Belirli Bir SQL_ID'ye Ait Tüm Sessionları Kill Etme
+Uygulama tarafında hatalı bir SQL sonsuz döngüye girdiyse ve yüzlerce session açtıysa:
+```sql
+SELECT 'ALTER SYSTEM KILL SESSION ''' || sid || ',' || serial# || ''' IMMEDIATE;' as kill_sql
+FROM v$session
+WHERE sql_id = '5xqm3n6t5k8b2'
+  AND status = 'ACTIVE';
+```
+
+### Uzun Süren RMAN Sessionlarını Bulma
+Backup işlemi takıldıysa veya sistemi çok yormaya başladıysa:
+```sql
+SELECT sid, serial#, username, program, elapsed_time/60 as min_elapsed
+FROM v$session
+WHERE program LIKE 'rman%' 
+  AND status = 'ACTIVE';
+```
+
+---
+
+## Best Practices ve Özet
+
+1.  **Commit/Rollback:** Uygulama geliştiricilere, transaction bitiminde mutlaka commit veya rollback yapmalarını hatırlatın. Açık kalan transactionlar en büyük kilit nedenidir.
+2.  **Unindexed Foreign Keys:** Foreign key sütunlarında index olmaması, tablo seviyesinde kilitlenmelere (TM lock) neden olabilir. Bu sütunları mutlaka indexleyin.
+3.  **Timeout:** Uygulama tarafında "lock timeout" süreleri belirleyerek sessionların sonsuza kadar beklemesini engelleyin.
+4.  **Monitoring:** `V$SESSION_WAIT` ve `V$LOCK` view'lerini kullanarak sistemi proaktif olarak izleyin.
+
+Kilit yönetimi, bir DBA için sadece bir teknik değil, aynı zamanda operasyonel bir sanattır. Doğru teşhis, sistemin kesintisiz hizmet vermesini sağlar.

@@ -1,0 +1,335 @@
+---
+title: "Oracle RMAN Konfigürasyonu ve Best Practices"
+description: "Oracle RMAN backup konfigürasyonu, retention policy, controlfile otomatik yedekleme, compression, encryption ve paralellik ayarları ile kapsamlı rehber."
+date: 2025-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "backup", "recovery", "konfigürasyon", "encryption", "compression"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN Konfigürasyonu ve Best Practices
+
+Oracle Recovery Manager (RMAN), veritabanı yedekleme ve kurtarma işlemleri için en önemli araçtır. Bu makalede, production ortamlarında kullanılan RMAN konfigürasyon parametrelerini ve best practice'leri detaylı şekilde inceleyeceğiz.
+
+
+<!--truncate-->
+## RMAN Konfigürasyonunu Görüntüleme
+
+Mevcut tüm RMAN konfigürasyonlarını görüntülemek için:
+
+```bash
+rman target /
+
+RMAN> show all;
+```
+
+<Callout type="info" title="Önemli Not">
+RMAN konfigürasyonları control file'da saklanır. Bu nedenle her RMAN backup'ından sonra control file'ın da yedeklendiğinden emin olun.
+</Callout>
+
+## 1. Saklama Kuralı (Retention Policy)
+
+Yedeklerin ne kadar süre saklanacağını belirler. İki farklı approach vardır:
+
+### Redundancy Policy
+
+Geçmişe yönelik kaç yedek saklanacağını belirler:
+
+```bash
+# Son 2 yedeği sakla
+RMAN> CONFIGURE RETENTION POLICY TO REDUNDANCY 2;
+```
+
+### Recovery Window Policy
+
+Yedeklerin saklanacağı zaman aralığını belirler:
+
+```bash
+# Son 3 güne ait yedekleri sakla
+RMAN> CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 3 DAYS;
+```
+
+<Callout type="warning" title="Uyarı">
+Aynı anda hem Redundancy hem de Recovery Window kullanamazsınız. Production ortamında genellikle Recovery Window tercih edilir.
+</Callout>
+
+## 2. Yedekleme Ortamı (Device Type)
+
+Yedeklerin hangi ortama alınacağını belirler:
+
+```bash
+# Disk yedeği
+RMAN> CONFIGURE DEFAULT DEVICE TYPE TO DISK;
+
+# Tape yedeği (SBT - System Backup to Tape)
+RMAN> CONFIGURE DEFAULT DEVICE TYPE TO SBT;
+```
+
+## 3. Controlfile Otomatik Yedekleme
+
+Control file'ın her yedekleme işleminde otomatik olarak yedeklenmesi:
+
+```bash
+# Controlfile aut backup'ı aç
+RMAN> CONFIGURE CONTROLFILE AUTOBACKUP ON;
+
+# Yedeklenecek lokasyonu belirle
+RMAN> CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK
+TO '/oracle/recovery_area/ctrl_%F';
+```
+
+<Callout type="success" title="Best Practice">
+Production ortamlarında controlfile aut backup mutlaka OPEN olmalıdır. Bu, complete disaster durumunda veritabanının kurtarılabilmesini sağlar.
+</Callout>
+
+## 4. Yedek Optimizasyonu
+
+Aynı verinin tekrar yedeklenmesini engeller:
+
+```bash
+RMAN> CONFIGURE BACKUP OPTIMIZATION ON;
+```
+
+Bu özellik sayesinde:
+- Değişmemiş datafile'lar tekrar yedeklenmez
+- Backup süresi kısalır
+- Disk alanından tasarruf sağlanır
+
+## 5. Paralellik Ayarı
+
+Backup işleminin kaç paralel channel ile yapılacağını belirler:
+
+```bash
+# 4 paralel channel
+RMAN> CONFIGURE DEVICE TYPE DISK PARALLELISM 4;
+```
+
+<Callout type="info" title="Performans İpucu">
+Paralellik sayısı, fiziksel disk sayısından fazla olmamalıdır. Genellikle 4-8 arası production için uygundur.
+</Callout>
+
+## 6. Şifreleme (Encryption)
+
+Backup dosyalarının şifrelenmesi:
+
+```bash
+# Database seviyesinde encryption'ı aç
+RMAN> CONFIGURE ENCRYPTION FOR DATABASE ON;
+
+# Encryption algoritmasını belirle
+RMAN> CONFIGURE ENCRYPTION ALGORITHM 'AES256';
+```
+
+Kullanılabilir algoritmalar:
+- **AES128**: AES 128-bit (daha hızlı)
+- **AES192**: AES 192-bit
+- **AES256**: AES 256-bit (en güvenli)
+
+```sql
+-- Mevcut algoritmaları görüntüle
+SELECT * FROM v$rman_encryption_algorithms;
+```
+
+## 7. Compression
+
+Yedek dosyalarının sıkıştırılması:
+
+```bash
+# Compression seviyeleri: BASIC, LOW, MEDIUM, HIGH
+RMAN> CONFIGURE COMPRESSION ALGORITHM 'MEDIUM';
+```
+
+Compression seviyeleri:
+- **BASIC**: En hızlı, en düşük compression oranı
+- **LOW**: Düşük CPU kullanımı
+- **MEDIUM**: Dengeli performans (önerilen)
+- **HIGH**: En yüksek compression, yüksek CPU kullanımı
+
+## 8. Archive Log Silme Politikası
+
+Archive logların ne zaman silineceğini belirler:
+
+### Backup Sonrası Silme
+
+```bash
+# 1 kez backup alındıktan sonra sil
+RMAN> CONFIGURE ARCHIVELOG DELETION POLICY TO BACKED UP 1 TIMES TO DEVICE TYPE DISK;
+```
+
+### Data Guard Ortamları İçin
+
+```bash
+# Tüm standby'larda apply edildikten sonra sil
+RMAN> CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
+
+# Tüm standby'lara transfer edildikten sonra sil
+RMAN> CONFIGURE ARCHIVELOG DELETION POLICY TO SHIPPED TO ALL STANDBY;
+```
+
+<Callout type="warning" title="Kritik Uyarı">
+Data Guard ortamlarında `APPLIED ON ALL STANDBY` politikası kullanın. `SHIPPED` politikası, henüz apply edilmemiş logların silinmesine neden olabilir.
+</Callout>
+
+## 9. Maksimum Yedek Set Boyutu
+
+Tek bir backup set'in maksimum boyutunu belirler:
+
+```bash
+# Channel başına maksimum 2GB
+RMAN> CONFIGURE CHANNEL DEVICE TYPE DISK MAXPIECESIZE=2G;
+
+# Backup set başına maksimum 4GB
+RMAN> CONFIGURE MAXSETSIZE TO 4G;
+```
+
+## 10. Snapshot Controlfile
+
+RMAN işlemleri için geçici controlfile yedeği:
+
+```bash
+RMAN> CONFIGURE SNAPSHOT CONTROLFILE NAME TO
+'/oracle/product/11.2.0/db/dbs/snapcf_TESTDB.f';
+```
+
+## 11. Mirror Backup
+
+Aynı backup'tan birden fazla kopya oluşturma:
+
+```bash
+# Datafile için 3 kopya
+RMAN> CONFIGURE DATAFILE BACKUP COPIES FOR DEVICE TYPE DISK TO 3;
+
+# Archivelog için 2 kopya
+RMAN> CONFIGURE ARCHIVELOG BACKUP COPIES FOR DEVICE TYPE DISK TO 2;
+```
+
+## Konfigürasyonu Görüntüleme
+
+Değiştirilen konfigürasyonları görüntüleme:
+
+```sql
+SELECT * FROM v$rman_configuration;
+```
+
+## Konfigürasyonu Sıfırlama
+
+Bir parametreyi varsayılan değere döndürme:
+
+```bash
+# Disk device ayarlarını sıfırla
+RMAN> CONFIGURE DEVICE TYPE DISK CLEAR;
+```
+
+## Production İçin Önerilen Konfigürasyon
+
+```bash
+# Recovery window - 7 gün sakla
+CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 7 DAYS;
+
+# Disk backup
+CONFIGURE DEFAULT DEVICE TYPE TO DISK;
+
+# Controlfile aut açık
+CONFIGURE CONTROLFILE AUTOBACKUP ON;
+
+# Optimizasyon açık
+CONFIGURE BACKUP OPTIMIZATION ON;
+
+# 4 paralel channel
+CONFIGURE DEVICE TYPE DISK PARALLELISM 4;
+
+# Compression medium
+CONFIGURE COMPRESSION ALGORITHM 'MEDIUM';
+
+# Encryption açık
+CONFIGURE ENCRYPTION FOR DATABASE ON;
+CONFIGURE ENCRYPTION ALGORITHM 'AES256';
+
+# Archive log policy (Data Guard yoksa)
+CONFIGURE ARCHIVELOG DELETION POLICY TO BACKED UP 1 TIMES TO DEVICE TYPE DISK;
+```
+
+<Callout type="success" title="Production Checklist">
+- [ ] Retention policy belirlendi
+- [ ] Controlfile aut backup açık
+- [ ] Backup optimizasyonu açık
+- [ ] Paralellik ayarlandı
+- [ ] Compression yapılandırıldı
+- [ ] Encryption aktif (gerekirse)
+- [ ] Archive log deletion policy ayarlandı
+- [ ] Maksimum set boyutu belirlendi
+- [ ] Snapshot controlfile yolu kontrol edildi
+</Callout>
+
+## İleri Seviye Konular
+
+### RMAN ile Scripting
+
+```bash
+# Backup script'i
+RUN {
+  ALLOCATE CHANNEL c1 DEVICE TYPE DISK;
+  ALLOCATE CHANNEL c2 DEVICE TYPE DISK;
+  ALLOCATE CHANNEL c3 DEVICE TYPE DISK;
+  ALLOCATE CHANNEL c4 DEVICE TYPE DISK;
+
+  BACKUP AS COMPRESSED BACKUPSET DATABASE;
+  BACKUP AS COMPRESSED BACKUPSET ARCHIVELOG ALL;
+
+  RELEASE CHANNEL c1;
+  RELEASE CHANNEL c2;
+  RELEASE CHANNEL c3;
+  RELEASE CHANNEL c4;
+}
+```
+
+### Backup Report Oluşturma
+
+```sql
+-- Son backup durumunu görüntüle
+SELECT
+  DB_NAME,
+  BACKUP_TYPE,
+  COMPLETION_TIME,
+  ELAPSED_SECONDS,
+  STATUS
+FROM V$BACKUP_SET
+ORDER BY COMPLETION_TIME DESC;
+```
+
+## Troubleshooting
+
+### Backup Failures
+
+```bash
+# RMAN loglarını kontrol et
+SHOW ALL;
+
+# Validation yap
+VALIDATE BACKUPSET 123;
+```
+
+### Encryption Issues
+
+```bash
+# Encryption wallet'ı aç
+ALTER SYSTEM SET ENCRYPTION KEY IDENTIFIED BY "password123";
+
+# Wallet status kontrolü
+SELECT * FROM V$ENCRYPTION_WALLET;
+```
+
+## Sonraki Adımlar
+
+Bu rehberi kullanarak:
+- [ ] Production RMAN konfigürasyonunuzu gözden geçirin
+- [ ] Test ortamında konfigürasyon değişikliklerini test edin
+- [ ] Backup validation prosedürleri oluşturun
+- [ ] RMAN monitoring script'leri implemente edin
+- [ ] Disaster recovery testleri yapın
+
+## Kaynaklar
+
+- Oracle Documentation: RMAN Configuration
+- My Oracle Support: RMAN Best Practices (Doc ID 1458028.1)
+- Oracle Backup and Recovery User's Guide

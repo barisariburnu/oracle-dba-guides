@@ -1,0 +1,104 @@
+---
+title: "Oracle Exadata: Cell Disk Değişimi ve Bakım Adımları"
+description: "Oracle Exadata veritabanı makinesinde arızalı cell disklerin tespiti, disk swap (değişim) servisi ve Griddisk/Celldisk yeniden yapılandırma prosedürü."
+date: "2026-01-16"
+category: "Exadata"
+tags: ["Oracle Exadata", "Cell Disk", "Griddisk", "Disk Swap", "Hardware Maintenance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Exadata: Cell Disk Değişimi ve Bakım Adımları
+
+Oracle **Exadata Storage Server (Cell)**, veritabanı dosyalarınızın fiziksel olarak barındığı noktadır. Herbir Cell sunucusu içerisinde çok sayıda yüksek performanslı HDD veya Flash disk bulunur. Bu disklerden biri arızalandığında, Exadata'nın esnek mimarisi sayesinde sistem kesintiye uğramadan çalışmaya devam eder ancak arızalı diskin en kısa sürede "Disk Swap" prosedürü ile değiştirilmesi gerekir. Bu makalede, bir Cell diskinin değişim öncesi hazırlıklarını, değişim adımlarını ve değişim sonrası ASM entegrasyonunu inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Arızalı Diski ve Cell Durumunu Sorgulama
+
+İlk adım, hangi cell'de hangi diskin sorunlu olduğunu saptamaktır. `CellCLI` üzerinden fiziksel diskleri listeleyerek statüsü `failed` veya `predictive failure` olanları bulabiliriz.
+
+```bash
+CellCLI> list physicaldisk attributes name, status, modelNumber, serialNumber;
+```
+
+Ayrıca veritabanı üzerinden tüm cell disklerin genel durumunu görmek için:
+
+```sql
+SELECT cell_name, 
+       disk_type, 
+       status, 
+       COUNT(*) AS disk_count
+FROM v$cell_config
+-- XML parsing ile detaylı statü çekilebilir
+GROUP BY cell_name, disk_type, status;
+```
+
+---
+
+## 2. Disk Değişim Hazırlığı (Disk Swap Service)
+
+Bir Cell sunucusundaki tüm diskleri (veya cell sunucusunun kendisini) değiştirecekseniz, cell'i güvenli bir şekilde kapatmanız gerekir.
+
+1.  **Rebalance Kontrolü:** Sistemde devam eden bir ASM rebalance işlemi olmadığından emin olun.
+    `SELECT count(*) FROM v$asm_operation;` (0 olmalıdır).
+2.  **Cell'i Kapatma:**
+    ```bash
+    ssh root@cell_ip
+    CellCLI> alter cell shutdown services all;
+    # Sunucuyu kapat
+    shutdown -h now
+    ```
+
+---
+
+## 3. Yeni Disklerin Yapılandırılması
+
+Fiziksel değişim yapıldıktan ve sunucu açıldıktan sonra, yeni diskler üzerinde `Celldisk` ve `Griddisk` yapılarının oluşturulması gerekir.
+
+```bash
+# Servisleri başlat
+CellCLI> alter cell restart services all;
+
+# Eski/Hatalı konfigürasyonu temizle
+CellCLI> drop flashcache force;
+CellCLI> drop celldisk all harddisk force;
+
+# Yeni yapıları oluştur
+CellCLI> create celldisk all;
+CellCLI> create flashlog all;
+CellCLI> create flashcache all;
+```
+
+### Griddisklerin Oluşturulması (Boyutlandırma Önemlidir)
+Griddisk boyutlarının diğer cell'lerdeki disklerle birebir aynı olması (`ASM` uyumluluğu için) kritiktir.
+
+```bash
+CellCLI> create griddisk all harddisk prefix=DATA_DG, size=3322G;
+CellCLI> create griddisk all harddisk prefix=RECO_DG;
+```
+
+---
+
+## 4. Değişen Diskleri ASM'e Geri Ekleme
+
+Son adımda, yeni oluşturduğumuz griddiskleri veritabanı katmanındaki ASM (Automatic Storage Management) yapısına dahil ediyoruz.
+
+```sql
+ALTER DISKGROUP DATA_DG 
+ADD DISK 'o/192.168.10.XX/DATA_*' 
+REBALANCE POWER 32;
+
+ALTER DISKGROUP RECO_DG 
+ADD DISK 'o/192.168.10.XX/RECO_*' 
+REBALANCE POWER 32;
+```
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **PXE Boot:** Eğer cell sunucusunun işletim sistemi (Image) bozulduysa, sunucuyu `PXE` üzerinden boot ederek imajı yeniden yüklemeniz gerekebilir.
+-   **Calibrate:** Yeni diskler eklendikten sonra mutlaka `calibrate force` komutu ile I/O performans testi yapın.
+-   **Firmware:** Yeni eklenen disklerin `physicalFirmware` versiyonunun diğer disklerle uyumlu olduğunu kontrol edin.
+
+Exadata donanım yönetimi, titizlik ve doğru sıralama gerektiren bir süreçtir. "Önce kontrol et, sonra uygula" prensibiyle cell disk değişimlerini sorunsuz tamamlayabilirsiniz.

@@ -1,0 +1,306 @@
+---
+title: "Oracle ASM Diskgroup Monitoring ve Kapasite Planlaması"
+description: "Oracle ASM diskgroup'larının kullanım durumunu izleme, doluluk oranlarını hesaplama ve kritik seviyeler için alarm kurma rehberi."
+date: 2026-01-16
+category: "Oracle ASM"
+tags: ["oracle", "asm", "diskgroup", "monitoring", "storage", "capacity planning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle ASM Diskgroup Monitoring ve Kapasite Planlaması
+
+Oracle ASM (Automatic Storage Management) diskgroup'larının düzenli olarak izlenmesi, veritabanının sürekliliği ve performansı için kritik önem taşır. Bu makalede, ASM diskgroup monitoring için kapsamlı SQL sorguları ve best practices sunacağım.
+
+
+<!--truncate-->
+## ASM Diskgroup Nedir?
+
+ASM, Oracle'ın otomatik storage management çözümüdür. Diskgroup'lar ise ASM içindeki disklerin mantıksal gruplarıdır. Her diskgroup şu özelliklere sahiptir:
+
+- Redundancy tipi (EXTERNAL, NORMAL, HIGH)
+- Toplam kapasite
+- Kullanılabilir boş alan
+- Otomatik büyüme (autoextend) özellikleri
+
+<Callout type="info" title="Önemli Not">
+ASM diskgroup doluluk oranı %80'i geçtiğinde acil aksiyon alınmalıdır. Backup işlemleri başarısız olabilir ve veritabanı işlem yapamayabilir.
+</Callout>
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri (ASM ile birlikte)
+- SYSASM yetkisi (ASM instance için)
+- `V$ASM_DISKGROUP` view'ine erişim
+
+## Temel Monitoring Sorgusu
+
+### Diskgroup Genel Durumu
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT group_number,
+       name,
+       type,
+       total_mb,
+       free_mb,
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS used_percent,
+       ROUND(free_mb / total_mb * 100, 2) AS free_percent
+  FROM v$asm_diskgroup
+ORDER BY name;
+```
+
+### Çıktı Örneği
+
+```
+GROUP_NUMBER NAME             TYPE         TOTAL_MB    FREE_MB  USED_PERCENT FREE_PERCENT
+------------ ---------------- ---------- ---------- ---------- ------------ ------------
+           1 DATA             EXTERNAL      1024000     512000        50.00        50.00
+           2 FRA              EXTERNAL       512000     256000        50.00        50.00
+           3 SYSTEM           EXTERNAL       256000     128000        50.00        50.00
+```
+
+## Gelişmiş Monitoring Sorgusu
+
+### Alert Kuralları ile Status Belirleme
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT name,
+       type,
+       total_mb,
+       free_mb,
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS used_percent,
+       CASE
+         WHEN ROUND((total_mb - free_mb) / total_mb * 100, 2) > 80 THEN 'CRITICAL'
+         WHEN ROUND((total_mb - free_mb) / total_mb * 100, 2) > 70 THEN 'WARNING'
+         ELSE 'OK'
+       END AS status,
+       ROUND(free_mb / 1024, 2) AS free_gb
+FROM v$asm_diskgroup
+ORDER BY used_percent DESC;
+```
+
+<Callout type="warning" title="Alert Kuralları">
+- **KRITIK**: %80 üzeri kullanım → Acil disk ekleme gerekli
+- **UYARI**: %70-80 arası kullanım → Planlı disk ekleme önerilir
+- **OK**: %70 altı kullanım → Normal durum
+</Callout>
+
+## Diskgroup Tipleri ve Redundancy
+
+| Tip      | Açıklama                              | Kullanım Oranı                   |
+| -------- | ------------------------------------- | -------------------------------- |
+| EXTERNAL | Diskler harici RAID ile yönetilir     | Toplam alan %100 kullanılabilir   |
+| NORMAL   | 2-way mirroring kullanılır            | Toplam alan %50 kullanılabilir    |
+| HIGH     | 3-way mirroring kullanılır            | Toplam alan %33.3 kullanılabilir  |
+
+## Kullanım
+
+### SQL*Plus ile Çalıştırma
+
+```bash
+# SYSASM yetkisi ile bağlanın
+sqlplus / as sysasm
+
+-- SQL içeriğini yapıştırın veya:
+@asm_disk.sql
+```
+
+### Bash Script Entegrasyonu
+
+```bash
+#!/bin/bash
+# asm_check.sh
+
+sqlplus -s / as sysasm << EOF > /tmp/asm_status.txt
+set linesize 2000
+set pagesize 2000
+SELECT name,
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS used_percent,
+       CASE
+         WHEN ROUND((total_mb - free_mb) / total_mb * 100, 2) > 80 THEN 'CRITICAL'
+         WHEN ROUND((total_mb - free_mb) / total_mb * 100, 2) > 70 THEN 'WARNING'
+         ELSE 'OK'
+       END AS status
+FROM v$asm_diskgroup;
+EOF
+
+# Kritik durumu kontrol et
+if grep -q "CRITICAL" /tmp/asm_status.txt; then
+    cat /tmp/asm_status.txt | mail -s "KRITIK: ASM Diskgroup Doluluk Uyarısı" dba@company.com
+fi
+```
+
+## İlgili Görünümler
+
+### Detaylı Disk Bilgileri
+
+```sql
+-- Diskgroup'daki diskleri görüntüle
+SELECT dg.name AS diskgroup,
+       d.name AS disk_name,
+       d.total_mb,
+       d.free_mb,
+       d.state,
+       d.path,
+       d.failgroup
+FROM v$asm_diskgroup dg
+JOIN v$asm_disk d ON dg.group_number = d.group_number
+ORDER BY dg.name, d.name;
+```
+
+### Diskgroup Kullanan Veritabanları
+
+```sql
+-- Hangi veritabanları hangi diskgroup'ları kullanıyor?
+SELECT db_name,
+       instance_name,
+       dg_name
+FROM v$asm_client
+ORDER BY db_name, dg_name;
+```
+
+## Kapasite Planlaması
+
+### Büyüme Trend Analizi
+
+Aşağıdaki sorgu ile son 30 günün büyüme trendini analiz edin:
+
+```sql
+-- ASM kullanım historisi (AWR'den)
+SELECT snap_id,
+       end_interval_time,
+       diskgroup_name,
+       total_mb,
+       free_mb,
+       used_mb
+FROM dba_hist_asm_stat
+WHERE end_interval_time > SYSDATE - 30
+ORDER BY diskgroup_name, snap_id;
+```
+
+### Gelecek Kapasite Tahmini
+
+Mevcut büyüme hızına göre 6 ay sonraki durumu tahmin edin:
+
+```sql
+-- Basit doğrusal tahmin
+WITH current_usage AS (
+  SELECT name,
+         total_mb,
+         free_mb,
+         (total_mb - free_mb) AS used_mb
+  FROM v$asm_diskgroup
+)
+SELECT name,
+       ROUND(used_mb / 1024, 2) AS current_used_gb,
+       ROUND(used_mb * 1.2 / 1024, 2) AS projected_6month_gb,
+       ROUND((used_mb * 1.2) - total_mb, 2) AS additional_needed_mb
+FROM current_usage
+WHERE (used_mb * 1.2) > total_mb;
+```
+
+## Performans İpuçları
+
+### 1. Düzenli Monitoring
+
+```bash
+# Cron job ile günlük kontrol
+0 8 * * * /u01/app/oracle/scripts/asm_check.sh
+```
+
+### 2. Proaktif Disk Ekleme
+
+- %70 kullanıma ulaştığında disk ekleme planlayın
+- Bekleme süresini hesaba katın (satınalma, teslimat, kurulum)
+- Hazırda yedek disk bulundurun
+
+### 3. Rebalancing Optimizasyonu
+
+Disk ekledikten sonra rebalancing hızını ayarlayın:
+
+```sql
+-- Rebalancing gücünü ayarla (1-11 arası, 11 en hızlı)
+ALTER DISKGROUP DATA REBALANCE POWER 11;
+```
+
+## Troubleshooting
+
+### Sorun: Diskgroup FULL Uyarısı
+
+**Çözüm Adımları:**
+
+1. İlk olarak gereksiz dosyaları silin (backup dosyalarını kontrol edin)
+2. Diskgroup'a yeni disk ekleyin:
+   ```sql
+   ALTER DISKGROUP DATA ADD DISK '/dev/raw/raw5';
+   ```
+3. Rebalancing işlemini başlatın:
+   ```sql
+   ALTER DISKGROUP DATA REBALANCE POWER 5;
+   ```
+
+### Sorun: Diskgroup Mount Başarısız
+
+**Çözüm Adımları:**
+
+1. Disk durumunu kontrol edin:
+   ```sql
+   SELECT name, state, path FROM v$asm_disk;
+   ```
+
+2. Disk durumunu analyze edin:
+   ```bash
+   asmcmd ls -lt
+   asmcmd lsattr -G DATA
+   ```
+
+3. Gerekirse diskgroup'ı force mount edin:
+   ```sql
+   ALTER DISKGROUP DATA MOUNT FORCE;
+   ```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Health Check
+
+Her sabah diskgroup durumunu kontrol edin ve raporlayın.
+
+### 2. Capacity Planning
+
+Aylık büyüme trendlerini analiz edin ve yıllık kapasite planlaması yapın.
+
+### 3. Backup Monitoring
+
+FRA (Fast Recovery Area) diskgroup'unu özel olarak izleyin, çünkü backup işlemleri için kritiktir.
+
+### 4. Alert Entegrasyonu
+
+Script'i monitoring sistemine entegre edin ve otomatik alarm oluşturun.
+
+## İlgili Dosyalar
+
+- [asm_disk.sql](../../GriDBCheck/asm_disk.sql) - Temel SQL sorgusu
+- [dg_asm_disk.sql](../../GriDBCheck/dg_asm_disk.sql) - Data Guard ASM disk scripti
+- [asm_disk.sh](../../GriDBCheck/dg_asm_disk.sh) - Bash script versiyonu
+
+## Kaynaklar
+
+- Oracle ASM Documentation
+- ASM Diskgroup Administration Guide
+- Oracle Support - ASM Best Practices
+
+## Sonraki Adımlar
+
+Bu ASM monitoring scriptleri ile şunları yapabilirsiniz:
+
+- Otomatik disk ekleme workflow'ları
+- Kapasite dashboard'ları (Grafana, Kibana)
+- Predictive analytics ve ML modelleri
+- Multi-site replikasyon senaryoları
+
+ASM diskgroup monitoring, veritabanı altyapısının en önemli parçalarından biridir. Bu scriptleri düzenli olarak kullanarak storage capacity sorunlarını önceden tespit edebilir ve kesintisiz hizmet sunabilirsiniz.

@@ -1,0 +1,79 @@
+---
+title: "Oracle SQL İpuçları: Başka Tablodan Güncelleme ve Mükerrer Kayıt Temizleme"
+description: "Oracle'da bir tabloyu başka bir tabloya göre güncelleme (Update with Join) ve veritabanındaki mükerrer (duplicate) kayıtları RowID kullanarak silme yöntemleri."
+date: "2026-01-16"
+category: "Geliştirme"
+tags: ["Oracle", "SQL", "Update Statement", "Duplicate Records", "RowID", "Database Maintenance"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL: Gelişmiş Güncelleme ve Temizlik Teknikleri
+
+Veritabanı yönetimi sırasında sıkça karşılaşılan iki temel operasyon vardır: Bir tablodaki verileri başka bir tablodaki eşleşen kayıtlara göre güncellemek ve tabloda kazara oluşan mükerrer (duplicate) kayıtları temizlemek. Bu makalede, bu işlemleri performanslı ve güvenli bir şekilde nasıl yapacağınızı göreceğiz.
+
+
+<!--truncate-->
+## 1. Başka Bir Tablodan Veri Güncelleme (Update with Join)
+
+Oracle'da standart `UPDATE` cümlesinde doğrudan `JOIN` kullanılamaz. Bunun yerine alt sorgu (subquery) veya `MERGE` yapısı tercih edilir.
+
+### Subquery ile Güncelleme
+Eğer Table_A'daki kolonları Table_B'deki değerlerle güncellemek istiyorsanız:
+
+```sql
+UPDATE Table_A A
+SET (b, c, d) = (SELECT b1, c1, d1 
+                 FROM Table_B B 
+                 WHERE B.id = A.id)
+WHERE EXISTS (SELECT 1 
+              FROM Table_B B 
+              WHERE B.id = A.id);
+```
+*Not: `WHERE EXISTS` kısmını eklemek çok önemlidir. Aksi takdirde, Table_B'de karşılığı olmayan Table_A kayıtlarının kolonları NULL ile ezilir.*
+
+### MERGE ile Daha Hızlı Güncelleme (Tavsiye Edilen)
+`MERGE` komutu genellikle subquery yönteminden daha performanslı çalışır:
+
+```sql
+MERGE INTO Table_A A
+USING Table_B B
+ON (A.id = B.id)
+WHEN MATCHED THEN
+  UPDATE SET A.b = B.b1, A.c = B.c1, A.d = B.d1;
+```
+
+---
+
+## 2. Mükerrer (Duplicate) Kayıtları Temizleme
+
+Bir tabloda aynı değerlere sahip birden fazla satır varsa ve her birinden sadece bir tanesini tutmak istiyorsanız, en sağlam yöntem **RowID** kullanmaktır.
+
+### Tek Bir Kolona Göre Mükerrer Kayıtları Silme
+Aşağıdaki sorgu, `SERIAL_NUM` değerleri aynı olan kayıtlardan, fiziksel adresi (RowID) en küçük olanı tutar ve diğerlerini siler:
+
+```sql
+DELETE FROM MUSTERI_YEDEKLER A 
+WHERE ROWID > (
+  SELECT MIN(ROWID) 
+  FROM MUSTERI_YEDEKLER B
+  WHERE A.SERIAL_NUM = B.SERIAL_NUM
+);
+```
+
+### Önce Kontrol Etme
+Silme işleminden önce hangi kayıtların mükerrer olduğunu görmek isterseniz:
+
+```sql
+SELECT SERIAL_NUM, COUNT(*)
+FROM MUSTERI_YEDEKLER
+GROUP BY SERIAL_NUM
+HAVING COUNT(*) > 1;
+```
+
+## Özet ve Güvenlik İpuçları
+
+-   **Hata Payı:** Büyük temizlik veya güncelleme işlemlerinden önce mutlaka tablonun bir yedeğini (`CREATE TABLE ... AS SELECT`) veya bir `Flashback Restore Point` alın.
+-   **Performans:** Mükerrer kayıt temizleme işlemi çok büyük tablolarda uzun sürebilir. Bu durumda paralellik (`PARALLEL` hint) kullanmayı veya tabloyu yeniden oluşturmayı (`CTAS`) düşünebilirsiniz.
+-   **Commit:** İşlem bittikten sonra sonuçları kontrol edip `COMMIT` demeyi unutmayın!
+
+Doğru SQL teknikleri, veritabanı bakım süreçlerinizi hem hızlandırır hem de hata riskini minimuma indirir.

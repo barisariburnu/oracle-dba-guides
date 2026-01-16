@@ -1,0 +1,340 @@
+---
+title: "Oracle Blocking Session: Kilitlenmeleri Tespit Etme ve Çözme Rehberi"
+description: "Oracle veritabanında blocking session tespiti, wait event analizi, kilitli objeleri bulma ve güvenli session sonlandırma (Kill) teknikleri."
+date: "2025-01-16"
+category: "Performans"
+tags: ["Blocking Session", "Wait Event", "Performance Tuning", "Lock Analysis", "Production DBA"]
+author: "Oracle DBA"
+coverImage: "/images/placeholder.png"
+---
+
+# Oracle Blocking Session: Kilitlenmeleri Tespit Etme ve Çözme Rehberi
+
+Oracle veritabanlarında "Blocking Session" (Bloklayan Oturum) durumları, bir veritabanı yöneticisinin mesaisinin en kritik anlarını oluşturur. Bir oturumun ihtiyaç duyduğu bir kaynağı (genellikle bir tablo satırı veya objeyi) başka bir oturumun kilitli tutması, sistemde zincirleme beklemelere ve uygulamanın tamamen durmasına neden olabilir. Bu durum kullanıcı tarafında "yavaşlık" veya "donma" olarak hissedilir ve hızla müdahale edilmezse veritabanı üzerinde yüzlerce oturumun birikmesine yol açar.
+
+
+<!--truncate-->
+Bu makalede, production sistemlerde kilitlenmeleri (Lock/Contention) saniyeler içinde nasıl tespit edebileceğinizi, bloklayan oturumun hangi SQL'i çalıştırdığını nasıl bulacağınızı ve sistemi güvenli bir şekilde nasıl eski haline getireceğinizi detaylandıracağız.
+
+<Callout type="danger">
+**Kritik Uyarı:** Bloklayan bir oturumu sonlandırmadan (Kill) önce, o oturumun bir "Batch Job" veya "Rollback" aşamasında olup olmadığını kontrol etmek hayatidir. Yanlış bir müdahale, saatlerce sürecek bir recovery sürecini başlatabilir.
+</Callout>
+
+## Blocking Session Nedir?
+
+Oracle veritabanında bir session başka bir session'ın beklemesine neden olduğunda **blocking session** oluşur. Bu durum genellikle:
+
+- **Row-level locks** (DML işlemleri)
+- **Table-level locks** (DDL işlemleri)
+- **Enqueue locks** (kaynak erişim kilitleri)
+- **Transaction locks** (commit edilmeyen işlemler)
+
+sonucunda ortaya çıkar ve **critical performance issue**'lara yol açar.
+
+## Blocking Session Tespit SQL Sorguları
+
+### 1. Hızlı Blocking Session Kontrolü
+
+```sql
+-- Blocking ve blocked session'ları listele
+SELECT a.sid "waiting sid",
+       d.sql_text "waiting SQL",
+       a.ROW_WAIT_OBJ# "locked object",
+       a.BLOCKING_SESSION "blocking sid",
+       c.sql_text "SQL from blocking session"
+FROM   v$session a,
+       v$active_session_history b,
+       v$sql c,
+       v$sql d
+WHERE  a.sql_id = d.sql_id
+AND    a.blocking_session = b.session_id
+AND    c.sql_id = b.sql_id
+AND    b.CURRENT_OBJ# = a.ROW_WAIT_OBJ#
+AND    b.CURRENT_FILE# = a.ROW_WAIT_FILE#
+AND    b.CURRENT_BLOCK# = a.ROW_WAIT_BLOCK#;
+```
+
+Bu sorgu şu bilgileri sağlar:
+- **Waiting SID**: Bekleyen session ID'si
+- **Waiting SQL**: Bekleyen session'ın çalıştırmaya çalıştığı SQL
+- **Locked Object**: Kilitli obje ID'si
+- **Blocking SID**: Engelleyen session ID'si
+- **SQL from Blocking Session**: Engelleyen session'ın çalıştırdığı SQL
+
+### 2. Detaylı Lock Analizi
+
+```sql
+-- Tüm lock'ları görüntüle
+SELECT * FROM gv$lock;
+
+-- Sadece request > 0 olanları (bekleyen lock'ları)
+SELECT * FROM gv$lock WHERE request > 0;
+```
+
+### 3. Blocking Session Detayları
+
+```sql
+-- Blocking session ile ilgili detaylı bilgi
+SELECT blocking_session,
+       COUNT(*) AS blocked_count,
+       MAX(seconds_in_wait) AS max_wait_seconds,
+       AVG(seconds_in_wait) AS avg_wait_seconds
+FROM   v$session
+WHERE  blocking_session > 0
+GROUP BY blocking_session
+ORDER BY blocked_count DESC;
+```
+
+<Callout type="info">
+**Pro Tip**: Bu sorgu hangi session'ın en çok diğer session'ı blokladığını gösterir. Yüksek `blocked_count` değerleri **ciddi performans sorunlarını** işaret eder.
+</Callout>
+
+### 4. Lock Yapan Objeyi Bulma
+
+```sql
+-- Hangi tablo/obje lock yapıyor?
+SELECT b.owner,
+       b.object_name,
+       a.oracle_username,
+       a.os_user_name
+FROM   v$locked_object a,
+       all_objects b
+WHERE  a.object_id = b.object_id;
+```
+
+### 5. Blocking ve Blocked Session'ları Birlikte Görme
+
+```sql
+-- Blocking chain analizi
+SELECT a.sid "Blocking Session",
+       b.sid "Blocked Session"
+FROM   v$lock a,
+       v$lock b
+WHERE  a.sid != b.sid
+AND    a.id1 = b.id1
+AND    a.id2 = b.id2
+AND    b.request > 0
+AND    a.block = 1;
+```
+
+### 6. Gerçek Zamanlı Blocking Session Monitor
+
+```sql
+-- Gerçek zamanlı blocking session monitor
+SELECT s.sid,
+       s.username,
+       s.serial#,
+       s.process,
+       NVL(s.sql_id, 0) AS sql_id,
+       s.sql_address,
+       q.sql_text,
+       s.blocking_session,
+       s.wait_class,
+       s.event,
+       s.p1,
+       s.p2,
+       s.p3,
+       s.seconds_in_wait
+FROM   gv$session s,
+       gv$sql q
+WHERE  (blocking_session_status = 'VALID'
+        OR sid IN (SELECT blocking_session
+                   FROM   gv$session
+                   WHERE  blocking_session_status = 'VALID'))
+AND    NVL(s.sql_id, 0) = q.sql_id(+);
+```
+
+## Kill Script Hazırlama
+
+### 1. Tek Session Kill
+
+```sql
+-- Session kill komutu oluştur
+SELECT 'alter system kill session ''' || SID || ',' || s.serial# || ''';'
+FROM   v$session s
+WHERE  s.SID = :SID_PLACEHOLDER;
+```
+
+### 2. Blocking Session'ları Toplu Kill
+
+```sql
+-- Tüm blocking session'ları kill et (DİKKAT!)
+SELECT 'alter system kill session ''' || SID || ',' || s.serial# || ',@' || inst_id || ''';'
+FROM   gv$session s
+WHERE  blocking_session_status = 'VALID'
+OR     sid IN (SELECT blocking_session
+              FROM   gv$session
+              WHERE  blocking_session_status = 'VALID');
+```
+
+<Callout type="warning">
+**⚠️ Production Uyarısı**
+Session kill etmeden önce mutlaka:
+1. Session'ın ne yaptığını anlayın
+2. İş的业务 etkisini değerlendirin
+3. Transaction rollback süresini hesaplayın
+4. Ekip liderinden onay alın
+</Callout>
+
+### 3. OS Level Process Kill
+
+```sql
+-- OS process kill script (SON ÇARE)
+SELECT 'kill -9 ' || p.spid,
+       s.username,
+       'alter system kill session ''' || SID || ',' || s.serial# || ''';'
+FROM   v$session s,
+       v$process p
+WHERE  s.paddr = p.addr(+)
+AND    s.SID = :SID_PLACEHOLDER;
+```
+
+## Özel Senaryolar
+
+### 1. Enqueue Wait Eventleri
+
+```sql
+-- Enqueue lock bekleyen session'ları bul
+SELECT 'kill -9 ' || p.spid,
+       s.username,
+       'alter system kill session ''' || SID || ',' || s.serial# || ''';'
+FROM   v$session s,
+       v$process p
+WHERE  s.paddr = p.addr(+)
+AND    s.SID IN (SELECT SID
+                FROM   v$session_wait
+                WHERE  event LIKE '%enq%row%')
+AND    s.saddr NOT IN (SELECT ses_addr
+                       FROM   v$transaction);
+```
+
+### 2. SQL*Net Message from Client Bekleyenler
+
+```sql
+-- SQL*Net message from client bekleyen idle session'ları temizle
+SELECT 'kill -9 ' || p.spid,
+       s.username,
+       'alter system kill session ''' || SID || ',' || s.serial# || ''';'
+FROM   v$session s,
+       v$process p
+WHERE  s.paddr = p.addr
+AND    s.SID IN (SELECT SID
+                FROM   v$session
+                WHERE  event LIKE 'SQL*Net message from client%')
+AND    s.username = 'USERNAME_PLACEHOLDER'
+AND    s.saddr NOT IN (SELECT saddr
+                       FROM   v$transaction);
+```
+
+## Blocking Session Önleme Stratejileri
+
+### 1. Transaction Management
+
+```sql
+-- Uzun süren transaction'ları tespit et
+SELECT s.sid,
+       s.serial#,
+       s.username,
+       t.start_time,
+       s.logon_time,
+       s.status,
+       s.sql_id
+FROM   v$session s,
+       v$transaction t
+WHERE  s.saddr = t.ses_addr
+ORDER BY t.start_time;
+```
+
+### 2. Lock Timeout Ayarı
+
+```sql
+-- Lock timeout parametresi
+ALTER SYSTEM SET distributed_lock_timeout = 60 SCOPE = BOTH;
+```
+
+### 3. Application Design İyileştirmeleri
+
+- **Kısa transaction'lar**: Transaction'ları mümkün olduğunca kısa tutun
+- **Commit sıklığı**: Large batch işlemlerde periyodik commit kullanın
+- **Index kullanımı**: Proper indexing ile lock süresini azaltın
+- **SELECT FOR UPDATE**: Gereksiz yere locking kullanmaktan kaçının
+
+## Monitoring ve Alerting
+
+### 1. Blocking Session Alert Script
+
+```sql
+-- Alert için blocking session kontrolü
+DECLARE
+   v_blocking_count NUMBER;
+   v_message        VARCHAR2(4000);
+BEGIN
+   SELECT COUNT(DISTINCT blocking_session)
+   INTO   v_blocking_count
+   FROM   v$session
+   WHERE  blocking_session > 0;
+
+   IF v_blocking_count > 0 THEN
+      -- Send alert (UTL_MAIL or external procedure)
+      v_message := 'Blocking session detected: ' || v_blocking_count ||
+                   ' sessions blocked';
+
+      -- Implement your alert mechanism here
+      NULL; -- UTL_MAIL_SEND or similar
+   END IF;
+END;
+/
+```
+
+### 2. AWR Report ile Historical Analysis
+
+```sql
+-- AWR'den geçmiş blocking session durumunu analiz et
+SELECT snap_id,
+       end_interval_time,
+       current_snapshot
+FROM   dba_hist_snapshot
+WHERE  snap_id BETWEEN :begin_snap AND :end_snap
+ORDER BY end_interval_time;
+```
+
+## Best Practices
+
+### ✅ DO's
+
+1. **Regüler monitoring**: Blocking session'ları periyodik kontrol edin
+2. **Proactive detection**: Wait event analizi ile önceden tespit edin
+3. **Root cause analysis**: Neden blocking olduğunu anlayın
+4. **Application review**: Kodun lock davranışını inceleyin
+5. **Documentation**: Blocking session incident'lerini dokümante edin
+
+### ❌ DON'Ts
+
+1. **Önce kill et**: Anlamadan session kill etmeyin
+2. **Rastgele monitoring**: Sadece sorun çıktığında bakmayın
+3. **Application忽视**: Kodun lock davranışını görmezden gelmeyin
+4. **Commit unutma**: Transaction açık bırakmayın
+5. **TEST etmeden Production'a koyma**: Değişiklikleri önce test edin
+
+## Troubleshooting Checklist
+
+- [ ] Blocking session'ları tespit et
+- [ ] Lock tipini belirle (row, table, enqueue)
+- [ ] Blocking session'ın SQL'ini identify et
+- [ ] Transaction başlangıç zamanını kontrol et
+- [ ] Wait event'i analiz et
+- [ ] İş önceliğini değerlendir
+- [ ] Kill kararı al (son çare)
+- [ ] Root cause'u belirle
+- [ ] Preventive action planı oluştur
+
+## İlgili Kaynaklar
+
+- [Oracle Wait Events Reference](https://docs.oracle.com/en/database/oracle/oracle-database/)
+- [V$SESSION View Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/)
+- [Performance Tuning Guide](/blog/oracle-performance-monitoring-scripts)
+
+<Callout type="success">
+**Özet**
+Blocking session yönetimi, Oracle DBA'ın en kritik becerilerinden biridir. Bu rehberde ele alınan SQL sorguları ve teknikler production ortamlarda **hemen uygulanabilir** ve **real-world sorunları çözmek** için tasarlanmıştır. Düzenli monitoring ve proactive yaklaşım ile ciddi performance sorunlarının çoğu önlenebilir.
+</Callout>

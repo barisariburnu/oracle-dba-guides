@@ -1,0 +1,106 @@
+---
+title: "Oracle Veritabanı Kapasite Takibi ve Otomatik Raporlama"
+description: "Oracle veritabanında disk ve segment büyüklüklerini düzenli olarak kaydeden bir izleme sistemi kurma, PL/SQL procedure ve DBMS_JOB ile büyüme analizi rehberi."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Capacity Planning", "DBMS_JOB", "PL/SQL Procedure", "Database Growth", "DBA Monitoring", "Kapasite Planlama"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Kapasite Takibi ve Otomatik Raporlama
+
+Veritabanı yöneticileri (DBA) için en kritik sorulardan biri şudur: "Veritabanımız ne kadar hızlı büyüyor ve ne kadar zamanımız kaldı?" Sadece anlık doluluğa bakmak geleceği tahmin etmek için yeterli değildir. Sağlıklı bir kapasite planlaması (Capacity Planning) için verilerin tarihsel olarak nasıl büyüdüğünü (Trend analizi) takip etmek gerekir. Bu makalede, Oracle'da veritabanı büyümesini her gün düzenli olarak kaydeden basit ama etkili bir izleme sisteminin nasıl kurulacağını inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. İzleme Şemasının ve Tabloların Hazırlanması
+
+Öncelikle izleme verilerini saklayacak bir kullanıcı (MONI) ve geçmiş verileri tutacak tabloları oluşturmalıyız.
+
+```sql
+-- İzleme kullanıcısı
+CREATE USER MONI IDENTIFIED BY "password123";
+GRANT CONNECT, RESOURCE TO MONI;
+GRANT SELECT ANY DICTIONARY TO MONI;
+
+-- Geçmiş veri dosyası (datafile) bilgilerini tutan tablo
+CREATE TABLE MONI.my_dba_data_files AS 
+SELECT 0 AS SIRA_NO, SYSDATE AS TARIH, t.* 
+FROM dba_data_files t WHERE 1=0;
+
+-- Geçmiş segment (table/index) bilgilerini tutan tablo
+CREATE TABLE MONI.my_dba_segments AS 
+SELECT 0 AS SIRA_NO, SYSDATE AS TARIH, t.* 
+FROM dba_segments t WHERE 1=0;
+
+-- İşlem takibi için bir sequence
+CREATE SEQUENCE MONI.SEQ_GROWTH START WITH 1;
+```
+
+---
+
+## 2. Veri Toplama Prosedürü (ETL)
+
+Her gün çalıştıracağımız ve o anki durumu tablolarımıza kaydedecek PL/SQL prosedürü:
+
+```sql
+CREATE OR REPLACE PROCEDURE MONI.collect_db_growth_stats
+AS
+   v_sira_no NUMBER;
+BEGIN
+   SELECT MONI.SEQ_GROWTH.NEXTVAL INTO v_sira_no FROM DUAL;
+
+   -- Datafile bilgilerini yedekle
+   INSERT INTO MONI.my_dba_data_files
+   SELECT v_sira_no, SYSDATE, dba_data_files.* FROM dba_data_files;
+
+   -- Segment bazlı doluluğu yedekle (Opsiyonel: Sadece büyük tablolar seçilebilir)
+   INSERT INTO MONI.my_dba_segments
+   SELECT v_sira_no, SYSDATE, dba_segments.* FROM dba_segments;
+
+   COMMIT;
+END;
+/
+```
+
+---
+
+## 3. Otomatik Çalıştırma (Job Tanımlama)
+
+Bu prosedürün her gece saat 00:00'da otomatik çalışması için `DBMS_SCHEDULER` (veya eski adıyla `DBMS_JOB`) kullanalım:
+
+```sql
+BEGIN
+  DBMS_SCHEDULER.CREATE_JOB (
+    job_name        => 'MONI_CAPACITY_TRACKER',
+    job_type        => 'STORED_PROCEDURE',
+    job_action      => 'MONI.collect_db_growth_stats',
+    start_date      => SYSTIMESTAMP,
+    repeat_interval => 'FREQ=DAILY; BYHOUR=0; BYMINUTE=0',
+    enabled         => TRUE
+  );
+END;
+/
+```
+
+---
+
+## 4. Büyüme Analizi Sorgusu
+
+Birkaç ay veri topladıktan sonra, veritabanının ay bazlı ne kadar büyüdüğünü şu sorgu ile görebilirsiniz:
+
+```sql
+SELECT TO_CHAR(TARIH, 'YYYY-MM') AS AY,
+       ROUND(SUM(BYTES)/1024/1024/1024, 2) AS TOPLAM_GB
+FROM MONI.my_dba_segments
+GROUP BY TO_CHAR(TARIH, 'YYYY-MM')
+ORDER BY 1;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Alan Yönetimi:** `MONI.my_dba_segments` tablosu devasa bir veritabanında her gün binlerce satır ekleyebilir. Bu tabloyu periyodik olarak temizlemeyi veya sadece toplamları kaydedecek şekilde (aggregation) güncellemeyi düşünebilirsiniz.
+-   **Kapasite Tahmini:** Bu verileri Excel'e alarak "Trend Line" ekleyebilir ve disklerin ne zaman dolacağını matematiksel olarak öngörebilirsiniz.
+-   **Dengeli İzleme:** Sadece `dba_segments` değil, `dba_free_space` bilgisini de kaydederek tablespace doluluk trendlerini de izleyin.
+
+Veritabanı büyümesini ölçmek, gelecekteki bütçe ve donanım taleplerinizi veriye dayalı olarak savunmanızı sağlar. Tahmin yerine veri kullanın!

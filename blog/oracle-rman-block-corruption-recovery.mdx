@@ -1,0 +1,356 @@
+---
+title: "Oracle RMAN ile Block Corruption Kurtarma - Complete Recovery Guide"
+description: "Oracle veritabanında block corruption tespiti ve RMAN ile kurtarma işlemleri. V$DATABASE_BLOCK_CORRUPTION, blockrecover, validate ve DBV kullanımı."
+date: 2025-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "corruption", "recovery", "block recovery", "database", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN ile Block Corruption Kurtarma
+
+Oracle veritabanlarında **block corruption** en korkulan durumlardan biridir. Bu yazıda, corruption tespiti, etkilenen objelerin belirlenmesi ve RMAN ile **block-level recovery** işlemlerinin nasıl yapılacağını detaylı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Block corruption, disk arızaları, I/O hataları veya memory sorunları nedeniyle oluşabilir. Erkenci tespit ve hızlı müdahale veri kaybını minimize eder.
+</Callout>
+
+## Script'in Amacı
+
+Bu script block corruption ile ilgili şu işlemleri gerçekleştirir:
+
+- **Corruption tespiti** (V$DATABASE_BLOCK_CORRUPTION)
+- **Etkilenen objelerin** belirlenmesi (table, index, segment)
+- **Logical validation** ile tarama
+- **Block-level recovery** ile kurtarma
+- **DBV (DB Verify)** kullanımı
+
+## Önkoşullar
+
+1. **RMAN catalog** veya control file repository
+2. **Valid backup** mevcudu
+3. **SYSDBA** yetkisi
+4. **Archivelog mode** aktif olmalı
+
+## Block Corruption Tespiti
+
+### 1. Corruption View Kontrolü
+
+```sql
+-- Tüm corruption kayıtlarını görüntüle
+SELECT * FROM v$database_block_corruption;
+```
+
+**Çıktı Örneği:**
+
+```
+FILE#     BLOCK#     BLOCKS     CORRUPTION_TYPE     CORRUPTION_DESC
+---------- ---------- ---------- ------------------- ------------------
+18        1070338    1          FRACTURED BLOCK
+103       3844717    2          CHECKSUM ERROR
+```
+
+### 2. Etkilenen Objeleri Tespit Et
+
+```sql
+-- Corrupted bloğun hangi objeye ait olduğunu bul
+SELECT
+  tablespace_name,
+  segment_type,
+  owner,
+  segment_name
+FROM dba_extents
+WHERE file_id = 18
+  AND 948860 BETWEEN block_id AND block_id + blocks - 1;
+```
+
+**Çıktı Analizi:**
+
+```
+TABLESPACE_NAME  SEGMENT_TYPE  OWNER  SEGMENT_NAME
+---------------- ------------- ------ -----------------
+USERS            TABLE         SCOTT  EMPLOYEES
+```
+
+## RMAN ile Recovery
+
+### 1. Validate ve Recover - Tüm Database
+
+```sql
+-- Logical corruption kontrolü dahil tüm database'i validate et
+VALIDATE CHECK LOGICAL DATABASE;
+
+-- Tüm corruption listesini recover et
+RECOVER CORRUPTION LIST;
+```
+
+### 2. Belirli Block Recovery
+
+```sql
+-- Tekil block recovery
+BLOCKRECOVER DATAFILE 18 BLOCK 1070338;
+
+-- Çoklu block recovery
+BLOCKRECOVER DATAFILE 103 BLOCK 3844717
+               DATAFILE 38 BLOCK 1490618;
+```
+
+### 3. Catalog ile Recovery
+
+```bash
+# RMAN catalog'a bağlan
+rman target=/ catalog=rmancatalog/rmancatalog@catalog
+
+RMAN> blockrecover datafile 13 block 443343;
+```
+
+### 4. Datafile Validation
+
+```sql
+-- Belirli datafile'ı validate et
+BACKUP VALIDATE CHECK LOGICAL DATAFILE 13;
+```
+
+## DBV (DB Verify) Kullanımı
+
+### ASM Datafile için DBV
+
+```bash
+# ASM üzerindeki datafile'ı kontrol et
+dbv file=+DATAC1/DG/DATAFILE/ort_sicil_indx1.284.927242855 \
+     feedback=10000 \
+     blocksize=8192
+```
+
+**Çıktı Örneği:**
+
+```
+DBVERIFY - Verification starting : FILE = +DATAC1/...
+DBVERIFY - Verification complete
+
+Total Pages Examined   : 128000
+Total Pages Processed  : 127998
+Total Pages Failing    : 2
+Total Pages Marked Corrupt : 0
+Pages In Use           : 127998
+```
+
+### Filesystem Datafile için DBV
+
+```bash
+# Normal filesystem'deki datafile
+dbv file=/oracle/oradata/db01/users01.dbf \
+     blocksize=8192 \
+     logfile=dbv_users.log
+```
+
+## Kullanım Senaryoları
+
+### Senaryo 1: ORA-01578 Hatası
+
+**Hata:**
+```
+ORA-01578: ORACLE data block corrupted (file # 18, block # 1070338)
+```
+
+**Çözüm Adımları:**
+
+1. **Corruption tespiti:**
+```sql
+SELECT * FROM v$database_block_corruption;
+```
+
+2. **Objeyi belirle:**
+```sql
+SELECT owner, segment_name, segment_type
+FROM dba_extents
+WHERE file_id = 18
+  AND 1070338 BETWEEN block_id AND block_id + blocks - 1;
+```
+
+3. **RMAN ile recover:**
+```sql
+RMAN> blockrecover datafile 18 block 1070338;
+```
+
+### Senaryo 2: Logical Corruption
+
+**Hata:** ORA-3114 (end-of-file on communication channel)
+
+**Çözüm:**
+```sql
+-- Logical validation
+VALIDATE CHECK LOGICAL DATABASE;
+
+-- Recover
+RECOVER CORRUPTION LIST;
+```
+
+### Senaryo 3: Data Copy ile Kurtarma
+
+Alternatif yöntem:
+
+```sql
+-- 1. Tabloyu başka tablespace'e copy et
+CREATE TABLE corrupted_table_copy
+TABLESPACE users_new
+AS SELECT * FROM corrupted_table;
+
+-- 2. Eski tabloyu drop et
+DROP TABLE corrupted_table;
+
+-- 3. Yeni tabloyu rename et
+RENAME corrupted_table_copy TO corrupted_table;
+```
+
+## Çıktı Analizi
+
+### Başarılı Recovery Çıktısı
+
+```
+Starting block recover at 16-JAN-25
+using channel ORA_DISK_1
+
+channel ORA_DISK_1: restoring block(s)
+channel ORA_DISK_1: specifying block(s) to restore from backup set
+restoring blocks of datafile 00018
+channel ORA_DISK_1: reading from backup piece /backup/backupset_1234
+channel ORA_DISK_1: block restore complete, elapsed time: 00:00:15
+channel ORA_DISK_1: starting media recovery
+
+media recovery complete, elapsed time: 00:00:01
+
+Finished block recover at 16-JAN-25
+```
+
+### DBV Hata Çıktıları
+
+```
+DBV-00201: Block, DBA 75525317, marked corrupt for invalid redo application
+DBV-00111: OCI failure (4234)
+ORA-00600: internal error code, arguments: [17147], [0x7F9C87022FC0]
+```
+
+<Callout type="warning" title="Kritik Uyarı">
+Block corruption durumunda:
+1. Önce backup'ı test ortamında recover edin
+2. Production'da işlem yapmadan önce full backup alın
+3. Mümkünse maintenance window'da çalışın
+4. Corruption'un nedenini araştırın (disk, controller, vb.)
+</Callout>
+
+## Best Practices
+
+### 1. Corruption Önleme
+
+```sql
+-- Block checking aktif et
+ALTER SYSTEM SET db_block_checking = TYPICAL SCOPE=BOTH;
+
+-- Logical corruption kontrolü
+ALTER SYSTEM SET db_block_checksum = TYPICAL SCOPE=BOTH;
+```
+
+### 2. Düzenli Validation
+
+```bash
+# Haftalık validation job
+#!/bin/bash
+rman target / <<EOF
+VALIDATE CHECK LOGICAL DATABASE;
+EOF
+```
+
+### 3. Health Monitor Kullanımı
+
+```sql
+-- Health check çalıştır
+BEGIN
+  DBMS_HM.run_check(
+    hm_name => 'DB Structure Integrity Check',
+    run_name => 'my_run1'
+  );
+END;
+/
+
+-- Sonuçları görüntüle
+SELECT run_id, name, status, error_number
+FROM v$hm_run
+ORDER BY run_id DESC;
+```
+
+### 4. Proactive Monitoring
+
+```sql
+-- Corruption kontrol query'si
+SELECT COUNT(*) corrupted_blocks
+FROM v$database_block_corruption;
+
+-- Alert log'da corruption ara
+SELECT message_text
+FROM v$diag_alert_ext
+WHERE message_text LIKE '%corrupt%'
+  OR message_text LIKE '%ORA-01578%'
+ORDER BY originating_timestamp DESC;
+```
+
+## Troubleshooting
+
+### Durum 1: Backup'ta da Corruption
+
+```bash
+# İlgili datafile'ı farklı backup'tan restore et
+RUN {
+  SET UNTIL SEQUENCE 12345;
+  RESTORE DATAFILE 18 FROM TAG 'weekly_full';
+  RECOVER DATAFILE 18;
+}
+```
+
+### Durum 2: Recovery Başarısız
+
+```sql
+-- Data pump export ile tabloyu kurtar
+expdp directory=DATA_PUMP_DIR \
+      dumpfile=corrupted_table.dmp \
+      tables=owner.corrupted_table
+
+-- Yeni tablo oluştur
+impdp directory=DATA_PUMP_DIR \
+      dumpfile=corrupted_table.dmp \
+      remap_table=corrupted_table:new_table
+```
+
+### Durum 3: ASM Corruption
+
+```bash
+# ASM disk'i kontrol et
+asmcmd ls -l +DATA/DG/DATAFILE/
+
+# Diskgroup rebalance
+ALTER DISKGROUP DATA REBALANCE;
+```
+
+## Performance Etkileri
+
+**Validation İşlemi:**
+- CPU kullanımı: %20-40 artış
+- I/O load: Yoğun okuma
+- Süre: Database boyutuna bağlı (saatler)
+
+**Recovery İşlemi:**
+- Block recovery: Dakikalar
+- Datafile recovery: Saatler
+- Full recovery: Günler
+
+## İlgili Kaynaklar
+
+- [Oracle Block Corruption Recovery Guide](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/bradv/recovering-block-corruption.html)
+- [DB Verify Utility Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/sutil/oracle-database-utility-guide.pdf)
+- [RMAN Block Media Recovery](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/bradv/using-rman-block-media-recovery.html)
+
+## Sonraki Adımlar
+
+Bu yazıda block corruption kurtarma işlemlerini öğrendiniz. Diğer RMAN recovery senaryoları için blog yazılarımıza göz atabilirsiniz.

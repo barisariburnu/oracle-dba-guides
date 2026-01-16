@@ -1,0 +1,75 @@
+---
+title: "Oracle Redo Log Yönetimi: Boyutlandırma, Taşıma ve Optimizasyon"
+description: "Oracle veritabanında redo log dosyalarının yönetimi, performanslı disk alanlarına taşınması, log switch analizi ve log dosyası çoklama (Multiplexing)."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Redo Log", "Performance", "DBA", "Log Switch", "Database Management"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Redo Log Yönetimi ve Performans
+
+**Redo Log** dosyaları, Oracle veritabanındaki "günlük" (journal) sistemidir. Veritabanında yapılan her değişiklik önce bu dosyalara yazılır. Eğer redo log yazma hızı yavaşlarsa veya dosyalar çok sık dolarsa (`Log Switch`), tüm veritabanı performans kaybeder. Bu makalede, redo log dosyalarını yönetmeyi ve optimize etmeyi öğreneceğiz.
+
+
+<!--truncate-->
+## 1. Mevcut Durumu Analiz Etme
+
+Sisteminizde kaç tane redo log grubu olduğunu ve her birinin boyutunu şu sorgu ile görebilirsiniz:
+
+```sql
+SELECT group#, members, bytes/1024/1024 as MB, status 
+FROM v$log;
+
+-- Fiziksel dosya yolları için
+SELECT * FROM v$logfile;
+```
+
+---
+
+## 2. Redo Log Dosyalarını Taşıma (Rename/Relocate)
+
+Disk performansını artırmak için redo log dosyalarını daha hızlı (örn. SSD veya NVMe) disklere taşımak isteyebilirsiniz.
+
+**Taşıma Adımları:**
+1.  Veritabanını kapatın (`SHUTDOWN IMMEDIATE`).
+2.  Dosyaları işletim sistemi seviyesinde yeni yerlerine kopyalayın (`cp` veya `mv`).
+3.  Veritabanını `MOUNT` modunda açın.
+    ```sql
+    STARTUP MOUNT;
+    ALTER DATABASE RENAME FILE '/eski_yol/redo01.log' TO '/yeni_yol/redo01.log';
+    ```
+4.  Veritabanını açın (`ALTER DATABASE OPEN`).
+
+---
+
+## 3. Log Switch Analizi ve Optimizasyon
+
+Log switch (bir log dosyasının dolup diğerine geçmesi) işleminin saniyeler içinde değil, genellikle 15-20 dakikada bir olması idealdir. Eğer her dakika log switch oluyorsa, log dosyası boyutunuz sistem yüküne göre çok küçüktür.
+
+```sql
+-- Saatlik log switch sayılarını görme
+SELECT to_char(first_time, 'YYYY-MM-DD HH24') as hour, count(*) as switch_count
+FROM v$log_history
+WHERE first_time > sysdate - 1
+GROUP BY to_char(first_time, 'YYYY-MM-DD HH24')
+ORDER BY 1;
+```
+
+---
+
+## 4. Redo Log Multiplexing (Güvenlik)
+
+Control file'larda olduğu gibi, redo logların da her grupta en az iki kopyasının (üye) olması ve bunların farklı disk gruplarında saklanması önerilir.
+
+```sql
+ALTER DATABASE ADD LOGFILE MEMBER '/disk2/redo01_b.log' TO GROUP 1;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Log File Sync:** Eğer veritabanında `log file sync` bekleme olayı yüksekse, redo logların bulunduğu disklerin yazma hızı (I/O) yetersiz demektir.
+-   **Boyutlandırma:** Tüm redo log gruplarının aynı boyutta olması önerilir. Boyut artırımı yapacaksanız, önce yeni gruplar ekleyip eskileri silebilirsiniz.
+-   **Arşivleme:** Eğer veritabanı `ARCHIVELOG` modundaysa, redo loglar dolduğunda arşivlenmeden tekrar üzerine yazılamaz. Arşivleme sürecinin tıkanmadığından emin olun.
+
+Redo log yönetimi, yazma performansının (DML) temelidir. Doğru yapılandırılmış log dosyaları, veritabanının nefes almasını sağlar.

@@ -1,0 +1,93 @@
+---
+title: "Oracle RAC ve ASM Ortamında Controlfile Çoklaması (Multiplexing)"
+description: "Oracle RAC veritabanında ASM disk grupları üzerinde control file güvenliğini artırmak için çoklama (multiplexing) adımları ve srvctl ile yapılandırma."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle RAC", "Controlfile", "ASM", "Multiplexing", "Database Security", "srvctl", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RAC ve ASM Ortamında Controlfile Çoklaması
+
+Oracle veritabanının kalbi olan **Control File**, veritabanının fiziksel yapısını (datafile listesi, log dosyaları, checkpoint bilgileri vb.) tutar. Bu dosyanın kaybı, veritabanının açılamamasına neden olur. Bu yüzden, control file'ın farklı fiziksel disk gruplarında (ASM) en az 2 veya 3 kopyasının (multiplexing) bulunması hayati önem taşır. Bu makalede, Oracle RAC ortamında ASM kullanarak control file çoklama adımlarını inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Mevcut Durumu Kontrol Etme
+
+Öncelikle mevcut control file'ların hangi disk gruplarında olduğunu kontrol edelim:
+
+```sql
+SQL> SHOW PARAMETER control_files;
+
+-- Örnek Çıktı:
+-- NAME           TYPE     VALUE
+-- ------------- -------- ------------------------------------
+-- control_files  string   +DATA/ORCL/controlfile/current.256.123
+```
+
+---
+
+## 2. SPFILE Parametresini Güncelleme
+
+Veritabanına yeni eklenecek olan control file yolunu tanıtıyoruz. RAC ortamında olduğumuz için bu değişikliği `SPFILE` üzerinde yapmalı ve tüm instance'ları etkileyecek şekilde (scope=spfile) tanımlamalıyız.
+
+```sql
+SQL> ALTER SYSTEM SET control_files = 
+     '+DATA/ORCL/controlfile/current.256.123', 
+     '+RECO/ORCL/controlfile/current.xyz' 
+     SCOPE=SPFILE;
+```
+*Not: İkinci dosya yolu henüz fiziksel olarak mevcut değildir.*
+
+---
+
+## 3. Veritabanını Durdurma ve RMAN ile Kopyalama
+
+Control file fiziksel olarak kopyalanırken veritabanının kapalı veya `NOMOUNT` modunda olması gerekir.
+
+```bash
+-- 1. Veritabanını tüm node'larda durdur
+# srvctl stop database -d <DB_NAME>
+
+-- 2. Birinci node üzerinde NOMOUNT ile başlat
+# sqlplus / as sysdba
+SQL> STARTUP NOMOUNT;
+
+-- 3. RMAN ile mevcut dosyayı yeni disk grubuna kopyala
+# rman target /
+RMAN> RESTORE CONTROLFILE FROM '+DATA/ORCL/controlfile/current.256.123';
+```
+
+RMAN, dosyayı hedef disk grubuna (`+RECO`) kopyalayacak ve yeni bir dosya adı (Alias) oluşturacaktır.
+
+---
+
+## 4. Dosya Yollarını Doğrulama ve Açma
+
+RMAN kopyalama bittikten sonra, yeni oluşan dosya yolunu (RMAN çıktısından alarak) `SPFILE` içindeki parametre ile birebir eşleşip eşleşmediğini kontrol edin. Eğer isimler farklıysa (ASM OMF nedeniyle değişebilir), `ALTER SYSTEM` komutunu gerçek isimlerle tekrar çalıştırın.
+
+```sql
+-- Veritabanını aç
+SQL> ALTER DATABASE MOUNT;
+SQL> ALTER DATABASE OPEN;
+```
+
+---
+
+## 5. Tüm Node'ları Başlatma
+
+İşlem başarıyla bittiğinde, cluster üzerindeki diğer tüm instance'ları başlatabilirsiniz.
+
+```bash
+# srvctl start database -d <DB_NAME>
+# srvctl status database -d <DB_NAME>
+```
+
+## Özet ve Güvenlik İpuçları
+
+-   **Neden Farklı Disk Grubu?** Control file'ları aynı disk grubuna koymak, o disk grubunda oluşacak bir arıza (Corruption vb.) durumunda her iki kopyayı da kaybetmenize yol açar. Mutlaka `+DATA` ve `+RECO` (veya `+FRA`) gibi farklı grupları tercih edin.
+-   **Yedekleme:** İşlemden önce her zaman `ALTER DATABASE BACKUP CONTROLFILE TO TRACE;` komutu ile bir metin yedeği alın.
+-   **OMF (Oracle Managed Files):** ASM kullanırken dosya ismini tam yazmak yerine sadece disk grubunu (`+RECO`) hedef gösterirseniz, Oracle dosyaya otomatik benzersiz bir isim verecektir.
+
+Control file çoklaması, "felaket kurtarma" senaryolarında en büyük güvencenizdir. Birkaç dakikalık bu işlem, saatler sürecek bir restore operasyonunun önüne geçebilir.

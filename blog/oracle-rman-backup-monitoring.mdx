@@ -1,0 +1,358 @@
+---
+title: "Oracle RMAN Backup Monitoring Scripti ile Job Takibi"
+description: "RMAN backup işlerini izleme, başarısız backup'ları tespit etme ve backup performansını analiz etme için kapsamlı monitoring scripti."
+date: 2026-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "backup", "monitoring", "recovery", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN Backup Monitoring Scripti ile Job Takibi
+
+Veritabanı backup stratejisinin en önemli parçası, RMAN backup job'larının düzenli ve başarılı bir şekilde çalıştığını doğrulamaktır. Bu makalede, RMAN backup monitoring için gelişmiş bir SQL scripti sunacağım.
+
+
+<!--truncate-->
+## RMAN Backup Monitoring Önemi
+
+RMAN (Recovery Manager) backup'larının düzenli olarak izlenmesi şunları sağlar:
+
+- Backup job'larının başarılı çalıştığını doğrular
+- Başarısız backup işlerini hızlıca tespit eder
+- Backup sürelerini analiz ederek performans optimizasyonu yapar
+- Backup SLA uyumluluğunu kontrol eder
+- Recovery Point Objective (RPO) hedeflerine ulaşılmasını garanti eder
+
+<Callout type="warning" title="Kritik Uyarı">
+Backup job'larının başarısız olması sadece fark edildiğinde değil, her gün kontrol edilmelidir. Aksi takdirde disaster senaryosunda veri kaybı yaşanabilir.
+</Callout>
+
+## Script Özellikleri
+
+Bu monitoring scripti şu özellikleri sunar:
+
+- Son 7 gün içindeki tüm RMAN backup job'larını listeler
+- Backup tipini (FULL, INCREMENTAL, ARCHIVELOG) gösterir
+- Backup durumunu (COMPLETED, FAILED, RUNNING) raporlar
+- Backup süresini saat cinsinden hesaplar
+- Zaman bazlı sıralama ile en son işleri en üstte gösterir
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- SYSDBA yetkisi
+- `V$RMAN_BACKUP_JOB_DETAILS` view'ine erişim
+- RMAN catalog kullanılıyorsa catalog veritabanına bağlantı
+
+## Script İçeriği
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT start_time,
+       input_type,
+       status,
+       ROUND (elapsed_seconds / 3600, 1) time_hr
+  FROM v$rman_backup_job_details
+ WHERE START_TIME > SYSDATE - 7
+ORDER BY start_time DESC;
+
+exit
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama |
+|-------|----------|
+| **START_TIME** | Backup işinin başlangıç zamanı |
+| **INPUT_TYPE** | Backup tipi |
+| **STATUS** | Backup durumu |
+| **TIME_HR** | Backup süresi (saat cinsinden) |
+
+### INPUT_TYPE Değerleri
+
+- `DB INCR` - Incremental database backup
+- `DB FULL` - Full database backup
+- `ARCHIVELOG` - Archivelog backup
+- `DATAFILE FULL` - Datafile level full backup
+- `DATAFILE INCR` - Datafile level incremental backup
+
+### STATUS Değerleri
+
+- `COMPLETED` - Başarıyla tamamlandı
+- `FAILED` - Başarısız oldu
+- `RUNNING` - Şu anda çalışıyor
+- `FAILED WITH WARNINGS` - Uyarılarla başarısız oldu
+- `COMPLETED WITH WARNINGS` - Uyarılarla tamamlandı
+- `COMPLETED BACKUP` - Backup tamamlandı
+
+## Kullanım
+
+```bash
+sqlplus -s / as sysdba @backup.sql
+```
+
+## Örnek Çıktı
+
+```
+START_TIME          INPUT_TYPE       STATUS                TIME_HR
+------------------- ----------------- --------------------- --------
+16-JAN-26 02:00:00  DB FULL          COMPLETED              4.5
+16-JAN-26 06:00:00  ARCHIVELOG       COMPLETED              0.5
+15-JAN-26 02:00:00  DB INCR          COMPLETED              2.3
+15-JAN-26 06:00:00  ARCHIVELOG       COMPLETED              0.4
+14-JAN-26 02:00:00  DB FULL          FAILED                 1.2
+```
+
+<Callout type="info" title="İpucu">
+14-JAN-26 tarihli DB FULL backup başarısız olmuş. Bu durum hemen araştırılmalı ve gerekirse backup tekrarlanmalıdır.
+</Callout>
+
+## Gelişmiş Monitoring Sorguları
+
+### Başarısız Backup'ları Filtreleme
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT start_time,
+       end_time,
+       input_type,
+       status,
+       ROUND (elapsed_seconds / 3600, 1) time_hr,
+       output_bytes/1024/1024/1024 AS output_gb,
+       output_device_type
+  FROM v$rman_backup_job_details
+ WHERE STATUS IN ('FAILED', 'FAILED WITH WARNINGS')
+   AND START_TIME > SYSDATE - 30
+ORDER BY start_time DESC;
+```
+
+### Backup Performans Analizi
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT input_type,
+       COUNT(*) AS backup_count,
+       ROUND(AVG(elapsed_seconds / 3600), 2) AS avg_hours,
+       ROUND(MIN(elapsed_seconds / 3600), 2) AS min_hours,
+       ROUND(MAX(elapsed_seconds / 3600), 2) AS max_hours,
+       ROUND(SUM(output_bytes)/1024/1024/1024, 2) AS total_gb
+  FROM v$rman_backup_job_details
+ WHERE START_TIME > SYSDATE - 30
+   AND STATUS = 'COMPLETED'
+GROUP BY input_type
+ORDER BY input_type;
+```
+
+### Backup Trend Analizi (Son 30 Gün)
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT TRUNC(start_time) AS backup_date,
+       input_type,
+       COUNT(*) AS job_count,
+       SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS succeeded,
+       SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+       ROUND(AVG(elapsed_seconds / 3600), 2) AS avg_hours
+  FROM v$rman_backup_job_details
+ WHERE START_TIME > SYSDATE - 30
+GROUP BY TRUNC(start_time), input_type
+ORDER BY backup_date DESC, input_type;
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Backup Kontrolü
+
+Her sabah backup job'larının başarılı çalıştığını doğrulayın:
+
+```bash
+#!/bin/bash
+# backup_check.sh
+
+sqlplus -s / as sysdba @backup.sql > /tmp/backup_report.txt
+
+# Başarısız backup var mı kontrol et
+if grep -q "FAILED" /tmp/backup_report.txt; then
+    echo "BAŞARISIZ BACKUP TESPİT EDİLDİ!" | mail -s "Backup Alarm" dba@company.com
+    cat /tmp/backup_report.txt | mail -a "Backup Report" dba@company.com
+fi
+```
+
+### 2. Backup SLA Monitoring
+
+Backup job'larının SLA hedeflerine uygun çalıştığını kontrol edin:
+
+```sql
+-- Backup sürelerinin SLA'ya uygunluğunu kontrol et
+SELECT start_time,
+       input_type,
+       status,
+       ROUND (elapsed_seconds / 3600, 1) time_hr,
+       CASE
+         WHEN input_type = 'DB FULL' AND elapsed_seconds > 28800 THEN 'SLA VIOLATION'
+         WHEN input_type = 'DB INCR' AND elapsed_seconds > 14400 THEN 'SLA VIOLATION'
+         ELSE 'OK'
+       END AS sla_status
+  FROM v$rman_backup_job_details
+ WHERE START_TIME > SYSDATE - 7
+   AND STATUS = 'COMPLETED'
+ORDER BY start_time DESC;
+```
+
+### 3. Backup Kapasite Planlaması
+
+Backup büyüme trendlerini analiz edin:
+
+```sql
+SELECT TO_CHAR(start_time, 'YYYY-MM') AS backup_month,
+       input_type,
+       ROUND(SUM(output_bytes)/1024/1024/1024, 2) AS total_gb,
+       COUNT(*) AS backup_count
+  FROM v$rman_backup_job_details
+ WHERE START_TIME > SYSDATE - 365
+   AND STATUS = 'COMPLETED'
+GROUP BY TO_CHAR(start_time, 'YYYY-MM'), input_type
+ORDER BY backup_month DESC, input_type;
+```
+
+## RMAN Backup Best Practices
+
+### 1. Backup Stratejisi
+
+- **Level 0 Full Backup**: Haftada bir (Pazar gece)
+- **Level 1 Incremental**: Gün aşırı
+- **Archivelog Backup**: Her 2-4 saatte bir
+- **Controlfile Autobackup**: Her backup sonrası
+
+### 2. Monitoring Frekansı
+
+- **Günlük**: Backup job'larının başarı durumu
+- **Haftalık**: Backup performans trendleri
+- **Aylık**: Backup kapasite planlaması
+
+### 3. Alert Kuralları
+
+- **Kritik**: Backup başarısız → Acil aksiyon
+- **Uyarı**: Backup süresi SLA'yı aşıyor → İnceleme gerekli
+- **Bilgi**: Backup süresi normal → Takip etmeye devam
+
+## Troubleshooting
+
+### Sorun: Backup Başarısız
+
+**Çözüm Adımları:**
+
+1. Hata detaylarını kontrol edin:
+   ```sql
+   SELECT start_time, input_type, status, error
+   FROM v$rman_backup_job_details
+   WHERE status LIKE '%FAILED%'
+   ORDER BY start_time DESC;
+   ```
+
+2. RMAN log dosyasını inceleyin:
+   ```bash
+   # RMAN log lokasyonu
+   $ORACLE_BASE/diag/rdbms/<DB_NAME>/<SID>/trace/
+   ```
+
+3. Disk alanını kontrol edin:
+   ```sql
+   SELECT name, free_mb, total_mb
+   FROM v$recovery_file_dest;
+   ```
+
+4. Backup'ı manuel olarak tekrar deneyin:
+   ```rman
+   RMAN> BACKUP DATABASE;
+   ```
+
+### Sorun: Backup Süresi Çok Uzun
+
+**Çözüm Adımları:**
+
+1. Backup compression'ı kontrol edin:
+   ```rman
+   RMAN> SHOW ALL;
+   -- CONFIGURE COMPRESSION ALGORITHM 'BASIC';
+   ```
+
+2. Parallelism ayarını kontrol edin:
+   ```rman
+   RMAN> SHOW DEVICE TYPE;
+   -- CONFIGURE DEVICE TYPE DISK PARALLELISM 4;
+   ```
+
+3. I/O performansını analiz edin:
+   ```sql
+   SELECT * FROM TABLE(DBMS_WORKLOAD_REPOSITORY.ASH_REPORT_HTML(
+       dbid => NULL,
+       instance_number => NULL,
+       l_snap_id => :begin_snap_id,
+       e_snap_id => :end_snap_id));
+   ```
+
+## Entegrasyon Örnekleri
+
+### Nagios Plugin
+
+```bash
+#!/bin/bash
+# check_rman_backup.sh
+
+FAILED=$(sqlplus -s / as sysdba <<EOF
+SELECT COUNT(*) FROM v$rman_backup_job_details
+WHERE START_TIME > SYSDATE - 1 AND status = 'FAILED';
+EOF
+)
+
+if [ $FAILED -gt 0 ]; then
+    echo "CRITICAL: $FAILED failed backup jobs in last 24 hours"
+    exit 2
+else
+    echo "OK: No failed backups in last 24 hours"
+    exit 0
+fi
+```
+
+### Oracle Enterprise Manager
+
+OEM kullanıyorsanız, bu sorguyu custom metric olarak ekleyebilirsiniz:
+
+1. Metric Definition: RMAN Backup Status
+2. Collection Frequency: Every 1 Hour
+3. Alert Threshold: FAILED &gt; 0
+
+## İlgili Görünümler
+
+- `V$RMAN_BACKUP_JOB_DETAILS` - Backup job detayları
+- `V$RMAN_BACKUP_SUBJOB_DETAILS` - Alt job detayları
+- `V$BACKUP_SET` - Backup set bilgileri
+- `V$BACKUP_PIECE` - Backup piece bilgileri
+- `V$RECOVERY_FILE_DEST` - Recovery area kullanımı
+
+## Kaynaklar
+
+- Oracle RMAN Documentation
+- Oracle Backup and Recovery Guide
+- RMAN Best Practices White Paper
+
+## Sonraki Adımlar
+
+Bu RMAN backup monitoring scripti ile şunları yapabilirsiniz:
+
+- Otomatik alarm sistemi entegrasyonu
+- Backup performans dashboard'ı
+- Predictive backup süre analizi
+- Kapasite planlama ve trend analizi
+- Disaster recovery test senaryoları
+
+RMAN backup monitoring, veritabanı yönetiminin en kritik görevlerinden biridir. Bu scriptleri düzenli kullanarak backup stratejinizin sağlığını garanti altına alabilirsiniz.

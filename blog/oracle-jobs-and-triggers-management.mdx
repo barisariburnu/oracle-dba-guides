@@ -1,0 +1,104 @@
+---
+title: "Oracle Otomasyon: DBMS_SCHEDULER İşleri ve Veritabanı Triggerları"
+description: "Oracle veritabanında rutin işlerin otomatize edilmesi (Jobs) ve veritabanı olaylarının tetiklenmesi (Triggers) ile izleme ve güvenlik yönetimi."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Automation", "DBMS_SCHEDULER", "Triggers", "Auditing", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Otomasyon: DBMS_SCHEDULER ve Trigger Yönetimi
+
+Modern veritabanı yönetiminde otomasyon, hem hata riskini azaltır hem de yönetilebilirliği artırır. Oracle, rutin işlerin (yedekleme, istatistik toplama, raporlama) zamanlanması için `DBMS_SCHEDULER` paketini; veritabanı olaylarına (logon, startup, DML) anlık tepki vermek için ise **Trigger** (Tetikleyici) mekanizmasını sunar.
+
+
+<!--truncate-->
+Bu makalede, bu iki mekanizmanın profesyonel kullanım örneklerini inceleyeceğiz.
+
+## 1. DBMS_SCHEDULER ile İş Yönetimi
+
+Oracle 10g öncesindeki `DBMS_JOB` paketinin yerini alan `DBMS_SCHEDULER`, çok daha esnek ve detaylı bir zamanlama imkanı sunar.
+
+### Mevcut İşleri İzleme
+Sistemdeki işlerin durumunu ve son çalışma sonuçlarını görmek için şu görünümleri kullanabilirsiniz:
+
+```sql
+-- Tüm scheduler job'ları listele
+SELECT owner, job_name, job_action, start_date, state 
+FROM dba_scheduler_jobs;
+
+-- İşlerin çalışma loglarını incele
+SELECT log_date, job_name, status, error# 
+FROM dba_scheduler_job_run_details
+ORDER BY log_date DESC;
+```
+
+### Manuel İş Çalıştırma
+Zamanlanmış bir işi beklemeden hemen çalıştırmak için:
+
+```sql
+EXEC dbms_scheduler.run_job('MY_BACKUP_JOB');
+```
+
+---
+
+## 2. Veritabanı Triggerları (Tetikleyiciler)
+
+Triggerlar, belirli bir olay gerçekleştiğinde otomatik olarak çalışan PL/SQL bloklarıdır. Güvenlik, denetleme (auditing) ve veri bütünlüğü için kullanılırlar.
+
+### Güvenlik İçin Logon Trigger Kullanımı
+Bir kullanıcı veritabanına bağlandığında bilgilerini bir log tablosuna kaydetmek, güvenlik takibi için harika bir yöntemdir:
+
+```sql
+CREATE OR REPLACE TRIGGER LOGON_AUDIT_TRG
+   AFTER LOGON
+   ON DATABASE
+BEGIN
+   INSERT INTO OPERASYON.LOGON_HISTORY (
+      tarih, instance, terminal, os_user, db_user, ip, program
+   )
+   VALUES (
+      SYSDATE,
+      SYS_CONTEXT('USERENV', 'INSTANCE_NAME'),
+      SYS_CONTEXT('USERENV', 'TERMINAL'),
+      SYS_CONTEXT('USERENV', 'OS_USER'),
+      SYS_CONTEXT('USERENV', 'SESSION_USER'),
+      SYS_CONTEXT('USERENV', 'IP_ADDRESS'),
+      NULL -- Program bilgisi v$session'dan çekilebilir
+   );
+EXCEPTION
+   WHEN OTHERS THEN NULL; -- Bağlantının kopmasını engellemek için
+END;
+/
+```
+
+### Startup Trigger
+Veritabanı her açıldığında belirli ayarların (örn: pinning objects) yapılmasını sağlar:
+
+```sql
+CREATE OR REPLACE TRIGGER STARTUP_SETUP_TRG
+   AFTER STARTUP ON DATABASE
+BEGIN
+   -- Veritabanı açıldığında yapılacak işlemler
+   NULL;
+END;
+/
+```
+
+---
+
+## 3. DBMS_SCHEDULER ve Trigger Karşılaştırması
+
+| Özellik | DBMS_SCHEDULER | Database Trigger |
+| :--- | :--- | :--- |
+| **Zamanlama** | Belirli bir zamanda veya aralıkta çalışır. | Bir olay (Event) gerçekleştiğinde çalışır. |
+| **Kullanım Amacı** | Toplu işlemler, raporlar, bakımlar. | Auditing, veri kontrolü, senkronizasyon. |
+| **Performans** | Arka planda çalışır, kullanıcıyı bekletmez. | Kullanıcı işleminin bir parçasıdır, işlemi yavaşlatabilir. |
+
+## Özet ve En İyi Uygulamalar
+
+-   **Trigger İçinde Hata Yönetimi:** Özellikle `LOGON` veya `BEFORE` triggerlarında hata yönetimi (`EXCEPTION`) eksik olursa, veritabanına bağlantı sağlanamayabilir veya işlemler kilitlenebilir.
+-   **Logging Level:** `DBMS_SCHEDULER` işlerinde logging düzeyini (`logging_level`) ihtiyacınıza göre ayarlayarak (OFF, BASIC, FULL) disk alanından tasarruf edebilirsiniz.
+-   **Zombi İşler:** Çalışmayan veya hata alan işleri (`STATE = 'BROKEN'` veya `'FAILED'`) düzenli olarak kontrol edin.
+
+Otomasyon, bir DBA'in elindeki en güçlü araçtır ancak kontrolsüz bırakıldığında sorunların kaynağı olabilir. Her zaman test ortamında doğrulama yapmayı unutmayın!

@@ -1,0 +1,136 @@
+---
+title: "Oracle Index Maintenance: Fragmentation Analizi ve Rebuild Stratejileri"
+description: "Oracle veritabanında index performansını optimize etme, yüksek blevel sorunları, fragmentation analizi ve online index rebuild teknikleri rehberi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Index", "Index Fragmentation", "Index Rebuild", "B-Tree Depth", "Performance Tuning", "DBA Maintenance"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Index Maintenance: Fragmentation ve Performans Optimizasyonu
+
+Oracle veritabanında indexler, sorgu performansını artıran en temel araçlardır. Ancak zamanla yapılan INSERT, UPDATE ve DELETE işlemleri index yapısının bozulmasına (fragmentation), doluluk oranlarının düşmesine ve B-Tree derinliğinin (Blevel) artmasına neden olur. Bu durum, index üzerinden yapılan okumaların yavaşlamasına ve sistemin genel performansının düşmesine yol açar. Bu makalede, index sağlığını nasıl analiz edeceğinizi ve nasıl optimize edeceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## Index Sağlık Metrikleri
+
+Bir indexin performansını değerlendirmek için kullanılan üç ana metrik vardır:
+
+### 1. Blevel (Branch Level)
+B-Tree yapısının derinliğini gösterir. Bir index okuması sırasında kaç tane blok okunacağını belirler.
+- **Blevel = 0-2:** Sağlıklı ve ideal seviye.
+- **Blevel = 3:** Kabul edilebilir (büyük tablolarda normaldir).
+- **Blevel &gt; 3:** Riskli. Her okuma işlemi için 4 veya daha fazla blok fiziksel okuma yapılması gerekir, bu da performansı düşürür.
+
+```sql
+SELECT owner, index_name, table_name, blevel
+FROM dba_indexes
+WHERE blevel > 3
+ORDER BY blevel DESC;
+```
+
+### 2. Clustering Factor
+Tablodaki verilerin fiziksel dizilimi ile indexteki dizilimin ne kadar uyumlu olduğunu gösterir. 
+- Eğer clustering factor tablo blok sayısına yakınsa **iyidir**.
+- Eğer clustering factor tablo satır sayısına yakınsa **kötüdür** (veri diskte dağınıktır).
+
+### 3. Deleted Leaf Rows
+Silinen kayıtların index bloklarında bıraktığı boşluklardır. Index alanı (space) tasarrufu için bu boşlukların temizlenmesi gerekir.
+
+---
+
+## Index Fragmentation Analizi
+
+Bir indexin iç yapısını detaylı analiz etmek için `VALIDATE STRUCTURE` komutu kullanılır.
+
+```sql
+-- Analiz komutu (index büyükse disk I/O yapabilir)
+ANALYZE INDEX schema_name.index_name VALIDATE STRUCTURE;
+
+-- Sonuçları inceleme
+SELECT name,
+       height,
+       blocks,
+       lf_rows,
+       lf_blks,
+       del_lf_rows,
+       (del_lf_rows / lf_rows) * 100 AS deleted_pct
+FROM index_stats;
+```
+<Callout type="warning">
+**Kritik Eşik:** Eğer `Height > 3` veya `Deleted_PCT > %20` ise, o indexin rebuild (yeniden oluşturma) zamanı gelmiş demektir.
+</Callout>
+
+---
+
+## Index Rebuild Stratejileri
+
+Index performansını geri kazanmak için iki ana yöntem vardır:
+
+### 1. Online Index Rebuild
+Production sistemlerde en çok tercih edilen yöntemdir. Tablo üzerinde kilit oluşturmadan (lock-free) indexi arka planda yeniden oluşturur.
+```sql
+ALTER INDEX schema_name.index_name REBUILD ONLINE;
+```
+
+### 2. Parallel Rebuild (Hızlı İşlem)
+Büyük indexler için birden fazla CPU kullanarak işlemi hızlandırın.
+```sql
+ALTER INDEX schema_name.index_name REBUILD ONLINE PARALLEL 8;
+-- İşlem bittikten sonra parallelism'i kapatmayı unutmayın!
+ALTER INDEX schema_name.index_name NOPARALLEL;
+```
+
+### 3. Farklı Tablespace'e Taşıma
+Disk I/O dengesini sağlamak için indexi farklı bir disk grubuna taşıyabilirsiniz.
+```sql
+ALTER INDEX schema_name.index_name REBUILD TABLESPACE INDEX_TS_NEW ONLINE;
+```
+
+---
+
+## Otomatik Index Maintenance
+
+Sistemi sürekli sağlıklı tutmak için belirli kriterleri aşan indexleri otomatik rebuild eden bir job kurabilirsiniz.
+
+```sql
+-- Rebuild scripti üreten SQL
+SELECT 'ALTER INDEX ' || owner || '.' || index_name || ' REBUILD ONLINE;'
+FROM dba_indexes
+WHERE blevel > 3
+  AND owner NOT IN ('SYS', 'SYSTEM', 'DBSNMP')
+  AND status = 'VALID';
+```
+
+---
+
+## Index Monitoring (Kullanılmayan Index Tespiti)
+
+Bazen her DML işleminde yük oluşturan ancak hiçbir sorgu tarafından kullanılmayan indexler sistemde yer kaplar. Bunları tespit etmek için Oracle Monitoring özelliğini kullanabiliriz.
+
+```sql
+-- İzlemeyi başlat
+ALTER INDEX schema_name.idx_test MONITORING USAGE;
+
+-- Bir süre sonra (örneğin 1 hafta) kontrol et
+SELECT index_name, table_name, used, start_monitoring, end_monitoring
+FROM v$object_usage;
+```
+<Callout type="info" title="İpucu">
+`USED = 'NO'` olan indexleri silmek, INSERT ve UPDATE işlemlerini hızlandırır ve database backup boyutunu küçültür.
+</Callout>
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+1.  **Blevel Takibi:** Haftalık olarak blevel değeri 3'ü geçen indexleri raporlayın.
+2.  **Online İşlemler:** Kullanıcılar sistemdeyken sadece `REBUILD ONLINE` kullanın.
+3.  **Statistics:** Rebuild işleminden sonra mutlaka index istatistiklerini güncelleyin.
+    ```sql
+    EXEC DBMS_STATS.GATHER_INDEX_STATS('SCHEMA', 'INDEX_NAME');
+    ```
+4.  **Unused Indexes:** Kullanılmayan indexleri 1 ay izleyip sonrasında sistemden kaldırın. Veritabanı "ne kadar çok index o kadar hız" demek değildir; doğru index hız kazandırır.
+
+Bu rehber ile veritabanınızdaki index yükünü optimize edebilir, depolama alanından tasarruf sağlayabilir ve sorgu yanıt sürelerinizi iyileştirebilirsiniz.

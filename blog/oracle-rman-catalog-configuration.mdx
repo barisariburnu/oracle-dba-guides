@@ -1,0 +1,100 @@
+---
+title: "Oracle RMAN Recovery Catalog Yapılandırması ve Yönetimi"
+description: "Birden fazla veritabanının yedekleme metaverilerini merkezi bir noktada toplamak için RMAN Recovery Catalog kurulumu, yönetimi ve yetkilendirme süreçleri."
+date: 2026-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "recovery catalog", "centralized backup", "dba", "metadata"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN Recovery Catalog Yapılandırması ve Yönetimi
+
+Oracle RMAN varsayılan olarak yedekleme bilgilerini (metadata) hedef veritabanının **controlfile** dosyasında saklar. Ancak büyük ortamlarda, onlarca veritabanının yedeğini merkezi bir noktadan yönetmek, raporlamak ve saklama sürelerini (retention) controlfile limitlerinden bağımsız hale getirmek için **Recovery Catalog** kullanılır.
+
+
+<!--truncate-->
+## Neden Recovery Catalog Kullanmalıyız?
+
+- **Merkezi Yönetim:** Tüm veritabanlarının yedek durumlarını tek bir merkezi veritabanından izleyebilirsiniz.
+- **Historik Veri:** Controlfile yedeği sildikçe eski yedek bilgilerini kaybeder. Catalog ise yıllarca eski yedek bilgisini saklayabilir.
+- **RMAN Scripts:** Merkezi katalog üzerinde ortak yedekleme scriptleri (Stored Scripts) tanımlayıp tüm veritabanlarında çalıştırabilirsiniz.
+- **DR Güvenliği:** Controlfile ve tüm kopyaları kaybolsa bile, Katalog üzerinden veritabanını kolayca restore edebilirsiniz.
+
+## Adım Adım Recovery Catalog Kurulumu
+
+### 1. Katalog Veritabanında Hazırlık
+
+Katalog veritabanı, yedeklenecek (target) veritabanlarından farklı bir sunucuda olmalıdır.
+
+```sql
+-- Catalog için ayrı bir tablespace oluşturun
+CREATE TABLESPACE rman_cat_ts DATAFILE '/u01/app/oracle/oradata/catdb/rman_cat01.dbf' SIZE 500M AUTOEXTEND ON;
+
+-- RMAN kullanıcısını oluşturun
+CREATE USER rman_owner IDENTIFIED BY "password123"
+  DEFAULT TABLESPACE rman_cat_ts
+  QUOTA UNLIMITED ON rman_cat_ts;
+
+-- Gerekli rolleri atayın
+GRANT CONNECT, RESOURCE, RECOVERY_CATALOG_OWNER TO rman_owner;
+```
+
+### 2. Katalog Oluşturma
+
+RMAN aracılığıyla katalog şemasını fiziksel olarak oluşturun:
+
+```bash
+rman catalog rman_owner/Password123@CATDB
+```
+
+```rman
+RMAN> CREATE CATALOG;
+```
+
+### 3. Hedef Veritabanını Register Etme
+
+Yedeklenecek her bir veritabanını kataloğa tanıtın:
+
+```bash
+rman target / catalog rman_owner/Password123@CATDB
+```
+
+```rman
+RMAN> REGISTER DATABASE;
+```
+
+## Katalog Yönetimi ve Raporlama
+
+Katalog aktifken kullanabileceğiniz bazı kritik komutlar:
+
+```rman
+-- Kataloğu en güncel duruma getir (Resync)
+RESYNC CATALOG;
+
+-- Katalog üzerindeki tüm kayıtlı DB'leri gör
+LIST DB_KEY, DB_NAME OF DATABASE;
+
+-- Obsolete (artık gereksiz) yedekleri katalogdan sil
+REPORT OBSOLETE;
+DELETE OBSOLETE;
+```
+
+## Katalog SQL Sorguları
+
+Katalog veritabanına SQL ile bağlanarak özel raporlar alabilirsiniz:
+
+```sql
+-- Hangi veritabanı ne kadar yedek alan kaplıyor?
+SELECT db_name, 
+       ROUND(SUM(block_size * blocks) / 1024 / 1024, 2) AS total_mb
+FROM rc_backup_datafile
+GROUP BY db_name;
+```
+
+<Callout type="warning" title="Katalog Yedeği">
+Recovery Catalog veritabanınız çökerse tüm hedef veritabanlarının historik yedek bilgilerini kaybedersiniz. Bu nedenle **Katalog veritabanını mutlaka düzenli yedekleyin** ve ARCHIVELOG modunda tutun.
+</Callout>
+
+## Sonuç
+
+Recovery Catalog, kurumsal seviyede veritabanı yönetimi yapan ekipler için opsiyonel değil, bir zorunluluktur. Yedekleme operasyonlarınızı tek merkezden yöneterek hem hata payını azaltır hem de felaket kurtarma senaryolarında elinizi güçlendirirsiniz.

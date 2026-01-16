@@ -1,0 +1,102 @@
+---
+title: "Oracle Transportable Tablespace (TTS) Migration Rehberi"
+description: "Farklı veritabanları veya platformlar arasında büyük veri kümelerini hızla taşımak için kullanılan Transportable Tablespace (TTS) yönteminin adım adım uygulanması."
+date: 2026-01-16
+category: "Oracle Migration"
+tags: ["oracle", "transportable tablespace", "tts", "migration", "datapump", "asm", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Transportable Tablespace (TTS) Migration Rehberi
+
+Veritabanı migration projelerinde veri boyutu terabaytlar seviyesine ulaştığında klasik export/import yöntemleri çok uzun sürer. **Transportable Tablespace (TTS)** yöntemi, veriyi yeniden yazmak yerine sadece veri dosyalarını (datafiles) kopyalayarak ve metaveriyi (metadata) import ederek veriyi saniyeler içinde yeni veritabanına "takmanızı" (plug-in) sağlar.
+
+
+<!--truncate-->
+## TTS Yönteminin Avantajları
+
+- **Hız:** Sadece metadata export/import edildiği için veri miktarından bağımsız olarak işlem çok hızlı tamamlanır.
+- **Esneklik:** ASM'den Dosya Sistemine veya Dosya Sisteminden ASM'ye veri taşınabilir.
+- **Cross-Platform:** Farklı işletim sistemleri arasında (endian dönüşümü yaparak) veri taşınabilir.
+
+## Adım Adım TTS Uygulaması
+
+### 1. Bağımlılık Kontrolü (Self-Contained Check)
+
+Taşınacak tablespace setinin kendi içinde tutarlı olması gerekir. Örneğin, bir tablo bir tablespace'de, index'i başka bir (taşınmayacak) tablespace'de olmamalıdır.
+
+```sql
+EXECUTE DBMS_TTS.TRANSPORT_SET_CHECK('TABLESPACE_ADI', TRUE);
+
+-- Hataları kontrol edin
+SELECT * FROM TRANSPORT_SET_VIOLATIONS;
+```
+
+### 2. Tablespace'i Salt-Okunur Moda Getirme
+
+Aktarım sırasında verinin değişmemesi için tablespace `READ ONLY` yapılmalıdır:
+
+```sql
+ALTER TABLESPACE TABLESPACE_ADI READ ONLY;
+```
+
+### 3. Metadata Export (DataPump)
+
+Sadece yapısal bilgileri içeren export dosyasını oluşturun:
+
+```bash
+expdp system/password directory=EXPORT_DIR \
+      dumpfile=tts_metadata.dmp \
+      transport_tablespaces=TABLESPACE_ADI \
+      transport_full_check=y
+```
+
+### 4. Veri Dosyalarının Kopyalanması
+
+Datafile'ları kaynak sunucudan hedef sunucuya kopyalayın. Eğer ASM kullanıyorsanız `DBMS_FILE_TRANSFER` paketini kullanabilirsiniz:
+
+```sql
+BEGIN
+  DBMS_FILE_TRANSFER.PUT_FILE(
+    source_directory_object      => 'SOURCE_DIR',
+    source_file_name             => 'datafile01.dbf',
+    destination_directory_object => 'TARGET_DIR',
+    destination_file_name        => 'datafile01.dbf',
+    destination_database         => 'TARGET_DB_LINK'
+  );
+END;
+/
+```
+
+### 5. Metadata Import (Plug-in)
+
+Hedef veritabanında metadata'yı import ederek dosyaları veritabanına tanıtın:
+
+```bash
+impdp system/password directory=IMPORT_DIR \
+      dumpfile=tts_metadata.dmp \
+      transport_datafiles='/new_path/datafile01.dbf'
+```
+
+### 6. Tablespace'i Read-Write Moda Getirme
+
+İşlem tamamlandıktan sonra her iki tarafı da normal çalışma moduna getirin:
+
+```sql
+ALTER TABLESPACE TABLESPACE_ADI READ WRITE;
+```
+
+## Kritik İpuçları ve Best Practices
+
+- **Block Size:** Kaynak ve hedef veritabanlarının blok boyutları (Db_Block_Size) aynı olmalıdır (veya hedefte ilgili blok boyutu için buffer cache ayrılmış olmalıdır).
+- **Character Set:** Karakter setleri uyumlu olmalıdır.
+- **Endianness:** Eğer Windows'tan Linux'a veya AIX'e taşıma yapıyorsanız, Endian formatı farklı olabilir. Bu durumda `RMAN CONVERT` komutu ile dosya formatını çevirmeniz gerekir.
+- **User/Schema:** Import öncesinde hedef veritabanında ilgili kullanıcıların (owner) oluşturulmuş olması gerekir.
+
+<Callout type="success" title="Performans Notu">
+TTS ile 10 TB'lık bir veriyi taşımak, dosyaları kopyalama hızı (Network/Storage hızı) ile sınırlıdır. Metadata işlemi genellikle 5-10 dakika sürer.
+</Callout>
+
+## Sonuç
+
+Transportable Tablespace, büyük veri taşıma operasyonlarında DBA'nın en güçlü silahıdır. Manuel hata payını azaltmak için bu süreci yukarıdaki scriptler ile otomatize etmek, migration projelerindeki downtime sürelerini minimize eder.

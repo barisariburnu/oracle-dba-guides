@@ -1,0 +1,94 @@
+---
+title: "Oracle DBA Günlük Sağlık Kontrolü (Daily Health Check) ve HTML Raporlama"
+description: "Oracle veritabanlarında günlük sağlık taraması yapan, sonuçları HTML formatında birleştiren ve DBA ekibine otomatik mail atan profesyonel shell script otomasyonu."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Health Check", "DBA Automation", "HTML Reporting", "Shell Scripting", "Database Monitoring", "Linux"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle DBA Günlük Sağlık Kontrolü ve HTML Raporlama
+
+Bir veritabanı yöneticisinin sabah mesaiye başladığında yapacağı ilk iş, yönettiği sistemlerin genel durumunu kontrol etmektir. "Veritabanı açık mı? Tablespace dolmuş mu? Backup başarılı bitti mi? DataGuard senkronize mi?" gibi soruların tek tek yanıtlanması zaman alıcıdır. Bu süreci otomatize etmek ve her sabah e-posta kutunuzda tüm sistemlerin özetini içeren bir **HTML Raporu** bulmak, hem zaman kazandırır hem de farkındalığı artırır. Bu makalede, "GlobCheck" benzeri profesyonel bir izleme betiğinin nasıl çalıştığını inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Otomasyonun Çalışma Mantığı
+
+Sistem, bir ana shell script (`dbcontrol.sh`) ve bu script tarafından çağrılan SQL sorgularından oluşur. Her bir kontrol (Tablespace, Backup, Wait Events vb.) birer HTML tablosu olarak rapor dosyasına eklenir ve sonunda `sendEmail` gibi bir araçla mail atılır.
+
+### Ana Script Akışı (Bash):
+```bash
+#!/bin/bash
+REPORT_FILE="/home/oracle/reports/rapor.html"
+echo "<h1>Oracle DBA Günlük Sağlık Raporu</h1>" > $REPORT_FILE
+
+# 1. Veritabanı Genel Bilgi
+echo "<h3>1. Veritabanı Durumu</h3>" >> $REPORT_FILE
+echo "<pre>$(sqlplus -s / as sysdba @database_status.sql)</pre>" >> $REPORT_FILE
+
+# 2. Tablespace Dolulukları
+echo "<h3>2. Tablespace Durumu</h3>" >> $REPORT_FILE
+echo "<pre>$(sqlplus -s / as sysdba @tablespace_check.sql)</pre>" >> $REPORT_FILE
+
+# 3. Son Backup Durumu
+echo "<h3>3. RMAN Yedekleme Durumu</h3>" >> $REPORT_FILE
+echo "<pre>$(sqlplus -s / as sysdba @backup_status.sql)</pre>" >> $REPORT_FILE
+
+# Mail Gönderimi
+/usr/sbin/sendEmail -f "dba@company.com" -t "dba-team@company.com" \
+  -u "DB Health Check Report - $(date +%F)" \
+  -a $REPORT_FILE -s smtp.company.com
+```
+
+---
+
+## 2. Kritik SQL Sorguları
+
+Raporun içeriğini dolduran bazı temel SQL kontrolleri şunlardır:
+
+### Veritabanı Erişilebilirliği (database_status.sql)
+```sql
+SELECT instance_name, status, version, startup_time FROM v$instance;
+```
+
+### Tablespace Doluluk Oranları (tablespace_check.sql)
+```sql
+SELECT tablespace_name, 
+       ROUND(used_percent, 2) AS used_pct 
+FROM dba_tablespace_usage_metrics 
+WHERE used_percent > 85; -- Sadece kritik olanları raporla
+```
+
+### Bekleme Olayları (Wait Events)
+```sql
+SELECT event, total_waits, time_waited 
+FROM v$system_event 
+WHERE wait_class <> 'Idle' 
+ORDER BY time_waited DESC 
+FETCH FIRST 5 ROWS ONLY;
+```
+
+---
+
+## 3. DataGuard ve Cluster Takibi
+
+Eğer Exadata veya RAC kullanıyorsanız, raporu diğer node'ları ve DataGuard gecikmelerini de içerecek şekilde genişletebilirsiniz:
+
+```bash
+# Cluster Servisleri (Grid Infrastructure)
+echo "<h3>Grid Infrastructure Status</h3>" >> $REPORT_FILE
+echo "<pre>$(crsctl status res -t)</pre>" >> $REPORT_FILE
+
+# DataGuard Lag Bilgisi
+echo "<h3>DataGuard Lag Status</h3>" >> $REPORT_FILE
+echo "<pre>$(sqlplus -s / as sysdba @dg_lag_check.sql)</pre>" >> $REPORT_FILE
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Görselleştirme:** HTML tablolarında `%95` üzeri dolulukları `red` (kırmızı) renkle boyayacak CSS kuralları ekleyerek raporun okunabilirliğini artırabilirsiniz.
+-   **Zamanlama:** Bu scripti `crontab` üzerinden her sabah (örn: 07:30) çalışacak şekilde ayarlayın.
+-   **Minimalizm:** Raporu çok uzun tutmayın. Bir DBA'nın 10 saniyede her şeyin yolunda olduğunu anlamasını sağlayacak "Executive Summary" mantığı ile tasarlayın.
+
+Bu tür otomasyonlar, veritabanı yönetimini standartlaştırır ve olası sorunların gözden kaçma riskini minimize eder.

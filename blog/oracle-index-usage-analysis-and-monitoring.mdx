@@ -1,0 +1,88 @@
+---
+title: "Oracle Index Kullanım Analizi ve Gereksiz Indexlerin Tespiti"
+description: "Oracle veritabanında kullanılmayan indexleri saptama, Index Monitoring (V$OBJECT_USAGE) kullanımı ve performans üzerindeki index yükünü azaltma rehberi."
+date: "2026-01-16"
+category: "Index"
+tags: ["Oracle Index", "Index Monitoring", "V$OBJECT_USAGE", "Database Performance", "DBA Maintenance"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Index Kullanım Analizi: Gereksiz Indexlerden Kurtulun
+
+Veritabanında gereksiz veya hiç kullanılmayan indexler, sadece disk alanı kaplamakla kalmaz, her `INSERT`, `UPDATE` ve `DELETE` işleminde veritabanının ek iş yapmasına neden olarak DML performansını ciddi oranda düşürür. Bir DBA olarak hedefimiz, sorguları hızlandıran indexleri tutmak, ancak sistem üzerinde sadece yük oluşturan indexleri temizlemektir. Bu makalede, Oracle'ın **Index Monitoring** özelliğini kullanarak bir indexin gerçekten kullanılıp kullanılmadığını nasıl saptayacağınızı adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Index İzleme Yapmalıyız?
+
+1.  **DML Hızı:** Her index, tabloya veri ekleme süresini artırır. Gereksiz indexlerin silinmesi toplu yükleme işlemlerini hızlandırır.
+2.  **Depolama Alanı:** Çok büyük tabloların indexleri bazen tablonun kendisinden daha fazla yer kaplayabilir.
+3.  **Hatalı Seçimler:** Optimizer, bazen daha iyi bir plan varken yanlış bir indexi seçebilir. Kullanılmayan ama "bozuk" istatistikli indexler kafa karıştırabilir.
+
+---
+
+## Index Monitoring Nasıl Kullanılır?
+
+Oracle, varsayılan olarak index kullanımını her an kaydetmez (performans overhead'ini önlemek için). Bunu manuel olarak başlatmalısınız.
+
+### 1. İzlemeyi Başlatma
+Hangi indexi test etmek istiyorsanız, izleme moduna (Monitoring) almalısınız:
+
+```sql
+-- Tek bir index için izlemeyi aç
+ALTER INDEX HR.EMP_NAME_IDX MONITORING USAGE;
+
+-- Tüm şema için (Dinamik SQL üreterek)
+SELECT 'ALTER INDEX '||owner||'.'||index_name||' MONITORING USAGE;'
+FROM dba_indexes
+WHERE owner = 'MUHASEBE';
+```
+
+### 2. Kullanım Durumunu Kontrol Etme
+İzleme açıldıktan sonra, uygulama normal işleyişine devam ederken (veya bir rapor çalışırken) indexin kullanılıp kullanılmadığını `V$OBJECT_USAGE` görünümünden kontrol edebilirsiniz:
+
+```sql
+SELECT index_name, 
+       table_name, 
+       monitoring, 
+       used, 
+       start_monitoring, 
+       end_monitoring
+FROM v$object_usage;
+```
+- **USED = 'YES':** Index en az bir kez bir sorgu (veya constraint kontrolü) tarafından kullanılmış demektir.
+- **USED = 'NO':** İzleme başladığından beri indexe hiç dokunulmamış.
+
+### 3. İzlemeyi Durdurma
+Test süresi (örneğin 1 hafta) bittikten sonra izlemeyi kapatmalısınız:
+
+```sql
+ALTER INDEX HR.EMP_NAME_IDX NOMONITORING USAGE;
+```
+
+---
+
+## Önemli Dikkat Notları
+
+-   **Constraint Farkı:** Bazı indexler sorgu için değil, `UNIQUE` veya `PRIMARY KEY` kısıtını sağlamak için kullanılır. Bunları silmeden önce mutlaka bağımlılıkları kontrol edin.
+-   **Zamanlama:** Bir indexin "kullanılmıyor" sayılması için en az bir tam iş döngüsü (ay sonu raporları, haftalık batch job'lar vb.) beklenmelidir.
+-   **Sadece Kendi Session'ınız Değil:** Monitoring globaldir, veritabanına bağlanan tüm kullanıcıların aktivitelerini yakalar.
+
+---
+
+## Gelişmiş Takip (12c ve Üzeri)
+
+Eğer Oracle 12c R2 veya daha yeni bir sürüm kullanıyorsanız, `DBA_INDEX_USAGE` görünümü ile çok daha detaylı istatistiklere (indexin ne zaman kullanıldığına dair tarih bilgisi dahil) erişebilirsiniz.
+
+```sql
+SELECT owner, 
+       index_name, 
+       last_used, 
+       total_access_count
+FROM dba_index_usage
+WHERE owner = 'HR';
+```
+
+## Özet
+
+Gereksiz indexleri temizlemek, veritabanının üzerindeki "ölü ağırlığı" atmaktır. Index Monitoring kullanarak veriye dayalı kararlar verin ve sisteminizi daha hafif, daha hızlı bir hale getirin.

@@ -1,0 +1,90 @@
+---
+title: "Oracle RAC Yönetimi: srvctl ve crsctl Gereçleri ile Cluster Kontrolü"
+description: "Oracle Real Application Clusters (RAC) ortamlarında cluster kaynaklarını, veritabanlarını ve servisleri yönetmek için kullanılan srvctl ve crsctl komutları."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle RAC", "srvctl", "crsctl", "Clusterware", "Database Administration", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RAC Yönetimi: srvctl ve crsctl ile Cluster Kontrolü
+
+Oracle **Real Application Clusters (RAC)**, yüksek erişilebilirlik (HA) ve ölçeklenebilirlik sağlamak için birden fazla sunucunun (node) aynı veritabanına erişmesini sağlar. Bu karmaşık yapıyı yönetmek için standart SQL komutları yetersiz kalır. Oracle, cluster katmanını (`Grid Infrastructure`) ve veritabanı kaynaklarını yönetmek için iki temel komut satırı aracı sunar: **crsctl** ve **srvctl**.
+
+
+<!--truncate-->
+## 1. crsctl: Clusterware Seviyesi Yönetim
+
+`crsctl`, doğrudan Clusterware (Grid Infrastructure) yazılımını ve donanım seviyesindeki kaynakları yönetmek için kullanılır. Genellikle `root` veya `grid` kullanıcısı ile çalıştırılır.
+
+### Temel crsctl Komutları:
+-   **Cluster Durumunu Kontrol Etme:**
+    ```bash
+    crsctl check crs
+    ```
+-   **Kayıtlı Kaynakların Durumunu Görme (Özet):**
+    ```bash
+    crsctl status resource -t
+    ```
+-   **Cluster Yazılımını Başlatma/Durdurma:**
+    ```bash
+    crsctl start crs
+    crsctl stop crs
+    ```
+-   **Votedisk ve OCR Kontrolü:**
+    ```bash
+    crsctl query css votedisk
+    ```
+
+---
+
+## 2. srvctl: Veritabanı ve Servis Seviyesi Yönetim
+
+`srvctl` (Server Control), cluster üzerindeki veritabanlarını, instance'ları, servisleri, listener'ları ve VIP adreslerini yönetmek için kullanılan birincil araçtır.
+
+### Veritabanı Yönetimi:
+-   **Veritabanı Durumunu Sorgulama:**
+    ```bash
+    srvctl status database -d <DB_NAME>
+    ```
+-   **Veritabanını Başlatma/Durdurma (Tüm Node'larda):**
+    ```bash
+    srvctl start database -d <DB_NAME>
+    srvctl stop database -d <DB_NAME>
+    ```
+-   **Konfigürasyonu Görme:**
+    ```bash
+    srvctl config database -d <DB_NAME>
+    ```
+
+### Servis Yönetimi:
+RAC'da uygulamalar doğrudan instance ismine değil, oluşturulan "Service"lere bağlanmalıdır.
+-   **Servis Ekleme:**
+    ```bash
+    srvctl add service -d <DB_NAME> -s <SERV_NAME> -r <PREF_INST> -a <AVAIL_INST>
+    ```
+-   **Servisi Başlatma/Durdurma:**
+    ```bash
+    srvctl start service -d <DB_NAME> -s <SERV_NAME>
+    srvctl stop service -d <DB_NAME> -s <SERV_NAME>
+    ```
+-   **Servisi Başka Bir Node'a Taşıma (Relocate):**
+    ```bash
+    srvctl relocate service -d <DB_NAME> -s <SERV_NAME> -i <CURRENT_INST> -t <TARGET_INST>
+    ```
+
+---
+
+## 3. RAC'da Servis Kullanmanın Önemi
+
+RAC ortamında servis kullanmak, yük dengeleme (Load Balancing) ve hata toleransı (Failover) için kritiktir.
+-   **Preferred (Tercih Edilen):** Servisin normal şartlarda çalıştığı instance.
+-   **Available (Yedek):** Preferred instance çökerse servisin otomatik olarak taşınacağı instance.
+
+## Özet ve En İyi Uygulamalar
+
+-   **Hiyerarşi:** Önce `crsctl` ile cluster'ın ayakta olduğundan emin olun, sonra `srvctl` ile veritabanı ve servisleri yönetin.
+-   **Scripting:** Bakım dönemlerinde tüm node'ları kapatmak için `crsctl stop crs -all` komutunu (192.168.1.101+) kullanabilirsiniz.
+-   **Monitoring:** `crsctl status resource -t` çıktısındaki `OFFLINE` veya `INTERMEDIATE` durumlarını düzenli olarak kontrol edin.
+
+Oracle RAC yönetimi, bu iki aracın sunduğu güçle çocuk oyuncağına dönüşür. Komutları doğru kullanarak sisteminizin erişilebilirliğini maksimumda tutabilirsiniz.

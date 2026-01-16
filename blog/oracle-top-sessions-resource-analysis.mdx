@@ -1,0 +1,92 @@
+---
+title: "Oracle Top Sessions ve Kaynak Kullanım Analizi"
+description: "Veritabanında en çok CPU, I/O ve Memory tüketen session'ları tespit etmek için kullanılan kapsamlı SQL sorguları ve performans metrikleri."
+date: 2026-01-16
+category: "Oracle Performans"
+tags: ["oracle", "top sessions", "cpu usage", "io performance", "memory management", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Top Sessions ve Kaynak Kullanım Analizi
+
+Veritabanı performans sorunlarının çoğu, bir veya birkaç session'ın sistem kaynaklarını (CPU, I/O, Memory) aşırı tüketmesinden kaynaklanır. Bu makalede, "En çok kaynak tüketen session'ları" detaylı metriklerle raporlayan gelişmiş bir SQL scriptini inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Top Sessions Analizi Yapmalıyız?
+
+- **Bottleneck Tespiti:** Sistemin neden yavaşladığını hangi session'ın kaynakları sömürdüğünü anında görün.
+- **Resource Management:** Gereksiz CPU tüketen veya diskte aşırı sıralama (sort) yapan sorguları identify edin.
+- **Troubleshooting:** Kullanıcı şikayetlerini (benim ekranım neden bekliyor?) somut verilerle yanıtlayın.
+
+## Kapsamlı Top Sessions Scripti (Top 20)
+
+Aşağıdaki sorgu; fiziksel/mantıksal I/O, memory kullanımı (PGA/UGA), CPU dağılımı, sort işlemleri ve execution sayılarını tek bir tabloda sunar.
+
+### SQL Sorgusu: Resource Usage Analysis
+
+```sql
+SELECT * FROM
+(SELECT b.sid SID,
+        DECODE(b.username, NULL, e.name, b.username) App_User,
+        d.spid OS_ID,
+        b.machine Machine_Name,
+        TO_CHAR(logon_time, 'DD-MON-YY HH:MI:SS PM') Logon_Time,
+        -- Toplam Fiziksel I/O
+        (SUM(DECODE(c.name, 'physical reads', value, 0)) +
+         SUM(DECODE(c.name, 'physical writes', value, 0)) +
+         SUM(DECODE(c.name, 'physical writes direct', value, 0)) +
+         SUM(DECODE(c.name, 'physical reads direct', value, 0))) Total_Physical_IO,
+        -- Toplam Mantıksal I/O
+        (SUM(DECODE(c.name, 'db block gets', value, 0)) +
+         SUM(DECODE(c.name, 'db block changes', value, 0)) +
+         SUM(DECODE(c.name, 'consistent gets', value, 0))) Total_Logical_IO,
+        -- Memory Kullanımı (MB)
+        ROUND((SUM(DECODE(c.name, 'session pga memory', value, 0)) +
+               SUM(DECODE(c.name, 'session uga memory', value, 0))) / 1024 / 1024, 2) Memory_MB,
+        -- CPU Detayları
+        SUM(DECODE(c.name, 'cpu used by this session', value, 0)) Total_CPU,
+        SUM(DECODE(c.name, 'parse time cpu', value, 0)) Parse_CPU,
+        -- Sıralamalar ve Commitler
+        SUM(DECODE(c.name, 'sorts (disk)', value, 0)) Disk_Sorts,
+        SUM(DECODE(c.name, 'user commits', value, 0)) Commits,
+        SUM(DECODE(c.name, 'execute count', value, 0)) Executions
+ FROM sys.v_$sesstat a,
+      sys.v_$session b,
+      sys.v_$statname c,
+      sys.v_$process d,
+      sys.v_$bgprocess e
+ WHERE a.statistic# = c.statistic# 
+   AND b.sid = a.sid 
+   AND d.addr = b.paddr 
+   AND e.paddr (+) = b.paddr 
+   AND c.NAME IN ('physical reads', 'physical writes', 'physical writes direct', 
+                  'physical reads direct', 'db block gets', 'db block changes', 
+                  'consistent gets', 'session pga memory', 'session uga memory', 
+                  'cpu used by this session', 'parse time cpu', 'sorts (disk)', 
+                  'user commits', 'execute count')
+ GROUP BY b.sid, d.spid, DECODE(b.username, NULL, e.name, b.username), b.machine, logon_time
+ ORDER BY Total_Physical_IO DESC)
+WHERE rownum < 21;
+```
+
+## Metriklerin Yorumlanması
+
+- **Total_Physical_IO:** Yüksek değer, yetersiz index kullanımı veya memory (buffer cache) sorunlarına işaret eder. Diskten veri okunuyor demektir.
+- **Total_Logical_IO:** Yüksek değer, sorgunun memory'den çok fazla data block'u çektiğini gösterir. SQL'in daha verimli yazılması gerekebilir.
+- **Memory_MB:** Bir session'ın tükettiği özel memory (PGA) miktarını gösterir. Özellikle hash join ve sort işlemlerinde bu değer artar.
+- **Disk_Sorts:** Idealde "0" olmalıdır. Eğer bu değer yüksekse, `PGA_AGGREGATE_TARGET` parametresi küçük kalıyor veya sorgu çok büyük veri gruplarını sıralıyor demektir.
+
+<Callout type="warning" title="Kritik Kontrol">
+Eğer `Parse_CPU` değeri `Total_CPU` değerine çok yakınsa, sistemde "Bind Variables" kullanılmıyor demektir. Bu durum CPU'nun sadece sorguları analiz etmek için harcanmasına ve performansın çökmesine neden olur.
+</Callout>
+
+## Kullanım Senaryoları
+
+1. **Anlık Yavaşlık Analizi:** Sistem genelinde bir yavaşlık hissedildiğinde, bu sorguyu `Total_CPU` veya `Total_Physical_IO` bazlı sıralayarak soruna neden olan "Top Session"ı bulun.
+2. **Kullanıcı Bazlı Kaynak Takibi:** Belirli bir kullanıcının veya uygulamanın sistem üzerinde ne kadar yük oluşturduğunu izleyin.
+3. **Application Tuning:** `Executions` sayısı yüksek olup `Total_Logical_IO` değeri de yüksek olan sorguları optimize ederek toplam sistem yükünü azaltın.
+
+## Sonuç
+
+Top sessions analizi, veritabanı performans yönetiminin kalbidir. Kaynak kullanımını sadece rakamsal olarak değil, türlerine göre (I/O, CPU, Memory) ayırmak, sorunun kök nedenine (root cause) ulaşmanızı her zaman kolaylaştırır.

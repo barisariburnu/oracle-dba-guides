@@ -1,0 +1,97 @@
+---
+title: "Oracle Kullanıcı Yönetimi, Yetkilendirme ve Şifre Kurtarma"
+description: "Yeni veritabanı kullanıcısı oluşturma, yetkilendirme (Grant/Revoke) stratejileri ve süresi dolmuş (expired) şifreleri orijinalini bilmeden kurtarma teknikleri."
+date: 2026-01-16
+category: "Oracle Güvenlik"
+tags: ["oracle", "user management", "authorization", "grant", "expired password", "dba", "security"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Kullanıcı Yönetimi, Yetkilendirme ve Şifre Kurtarma
+
+Oracle veritabanında kullanıcı yönetimi, sadece `CREATE USER` demekten fazlasıdır. Doğru yetkilendirme modelleri kurmak, şifre politikalarını yönetmek ve acil durumlarda (şifre unutulduğunda veya süresi dolduğunda) müdahale etmek DBA'nın günlük görevleri arasındadır.
+
+
+<!--truncate-->
+## Yeni Bir Uygulama Kullanıcısı Oluşturma
+
+Bir uygulama kullanıcısı oluştururken ideal tablo alanı (tablespace), kota ve temel yetkilerin verilmesi gerekir.
+
+### SQL Script: Application User Creation
+
+```sql
+-- Kullanıcı oluşturma
+CREATE USER app_user IDENTIFIED BY "password123"
+DEFAULT TABLESPACE users
+TEMPORARY TABLESPACE temp
+QUOTA UNLIMITED ON users;
+
+-- Temel yetkilerin verilmesi
+GRANT CREATE SESSION TO app_user;
+GRANT CREATE TABLE TO app_user;
+GRANT CREATE VIEW TO app_user;
+GRANT CREATE PROCEDURE TO app_user;
+GRANT CREATE SEQUENCE TO app_user;
+GRANT CREATE SYNONYM TO app_user;
+```
+
+## Yetkilendirme Stratejileri (Grants)
+
+Güvenlik prensibi olarak kullanıcılara sadece ihtiyacı olan yetkileri (Least Privilege) vermeliyiz.
+
+### Bir Şemadaki Tüm Tablolara Read-Only Yetki Verme
+
+Eğer bir raporlama kullanıcısı oluşturuyorsanız, başka bir şemadaki tablolara şu şekilde yetki verebilirsiniz:
+
+```sql
+-- DYNAMIC SQL ile tüm tablolara yetki üretme
+BEGIN
+   FOR r IN (SELECT table_name FROM dba_tables WHERE owner = 'DATA_OWNER') LOOP
+      EXECUTE IMMEDIATE 'GRANT SELECT ON DATA_OWNER.' || r.table_name || ' TO report_user';
+   END LOOP;
+END;
+/
+```
+
+<Callout type="info" title="İpucu">
+Gelecekte eklenecek tablolar için de otomatik yetki verilmesini istiyorsanız, bir "Schema-level Trigger" kullanabilir veya Oracle 23c ile gelen "Schema Privileges" özelliğini inceleyebilirsiniz.
+</Callout>
+
+## Süresi Dolmuş (Expired) Şifreyi Kurtarma
+
+Bazı durumlarda bir kullanıcının şifresi dolar (`EXPIRED`) ve siz orijinal şifreyi bilmezsiniz. Ancak uygulamanın kesintiye uğramaması için aynı şifreyle hesabı tekrar açmanız gerekir.
+
+### Şifreyi Değiştirmeden Resetleme (Orijinal Hash Kullanarak)
+
+Oracle 11g ve sonrasında bu işlem `VALUES` yan tümcesi ile yapılır:
+
+```sql
+-- 1. Kullanıcının mevcut şifre hash değerini al (Sadece SYS yetkisiyle)
+SELECT spare4 FROM sys.user$ WHERE name = 'SCOTT';
+
+-- 2. Çıkan hash değerini kullanarak şifreyi resetle
+-- Hash örneği: S:79FD...
+ALTER USER scott IDENTIFIED BY "password123";
+```
+
+Bu işlem sonucunda kullanıcının şifresi değişmez, ancak `EXPIRED` durumu `OPEN` veya `LOCKED` (eğer kilitliyse) durumuna göre düzelir.
+
+## Kullanıcı İşlemleri ve Takibi
+
+Hangi kullanıcının hangi makinadan bağlandığını ve son SQL'lerini takip etmek için:
+
+```sql
+-- Bağlanan makinaların listesi
+SELECT machine, COUNT(*) 
+FROM v$session 
+GROUP BY machine;
+
+-- Kullanıcının SQL geçmişi (AWR)
+SELECT DISTINCT sql_id 
+FROM dba_hist_active_sess_history 
+WHERE user_id = (SELECT user_id FROM dba_users WHERE username = 'APP_USER');
+```
+
+## Sonuç
+
+Oracle kullanıcı yönetimi, güvenlik ve operasyonel sürekliliğin dengelendiği bir alandır. Yetkileri scriptler üzerinden yönetmek (Automation) ve kritik trickleri (Hash ile şifre kurtarma gibi) bilmek, sorun anında hızlı aksiyon almanızı sağlar.

@@ -1,0 +1,110 @@
+---
+title: "Oracle Top Query Analizi: AWR ve Snapshot Üzerinden Performans Raporlama"
+description: "Oracle veritabanında belirli zaman aralıklarında en çok kaynak tüketen SQL sorgularını (Top Queries) tespit etme, Siebel ve genel uygulama workload analizi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Top Queries", "AWR Analysis", "SQL Performance", "Siebel Tuning", "DBA Reporting"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Top Query Analizi: Workload ve Snapshot Raporlama
+
+Veritabanı yöneticileri için "Dün akşam sistem neden yavaştı?" sorusuna verilecek en teknik yanıt, o saat diliminde en çok kaynak tüketen (CPU, ELAPSED TIME, I/O) sorguları raporlamaktır. Oracle'ın AWR (Automatic Workload Repository) altyapısı, her snapshot aralığında bu verileri saklar. Özellikle Siebel gibi karmaşık ERP/CRM sistemlerinde veya yoğun workload altındaki uygulamalarda bu raporlar hayat kurtarıcıdır. Bu makalede, geçmişe dönük Top SQL analizi yapmanızı sağlayan profesyonel sorguları inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Snapshot Bazlı Analiz Yapmalıyız?
+
+Anlık (`V$SQL`) veriler sadece şu anki veya son birkaç saatlik durumu gösterir. Snapshot bazlı (`DBA_HIST_SQLSTAT`) analizler ise:
+1.  **Zaman Odaklıdır:** Belirli bir tarih ve saat aralığına odaklanır.
+2.  **Kümülatif Değildir:** Sadece seçilen aralıktaki farkı (`delta`) gösterir.
+3.  **Trend Sunar:** Workload'ın gün içine nasıl dağıldığını anlamanızı sağlar.
+
+---
+
+## 1. Genel Top SQL Analizi (AWR)
+
+Aşağıdaki sorgu, sistemdeki tüm şaseler için en yüksek toplam elapsed time'a sahip ilk 100 sorguyu bulur ve analiz için bir tabloya kaydeder:
+
+```sql
+SELECT * FROM (
+    SELECT s.parsing_schema_name,
+           s.sql_id,
+           SUM(s.elapsed_time_delta) / 1000000 AS total_elapsed_sec,
+           SUM(s.executions_delta) AS total_execs,
+           ROUND(SUM(s.elapsed_time_delta) / DECODE(SUM(s.executions_delta), 0, 1, SUM(s.executions_delta)) / 1000000, 3) AS avg_sec,
+           ROUND(SUM(s.buffer_gets_delta) / DECODE(SUM(s.executions_delta), 0, 1, SUM(s.executions_delta)), 0) AS avg_lio
+    FROM dba_hist_sqlstat s
+    JOIN dba_hist_snapshot sn ON s.snap_id = sn.snap_id 
+                             AND s.instance_number = sn.instance_number
+    WHERE sn.begin_interval_time > SYSDATE - 1 -- Son 24 saat
+    GROUP BY s.parsing_schema_name, s.sql_id
+    ORDER BY total_elapsed_sec DESC
+)
+WHERE ROWNUM <= 100;
+```
+
+---
+
+## 2. Siebel Spesifik Top Query Analizi
+
+Siebel sistemlerinde genellikle `SADMIN` veya `WEBAUTH` gibi kullanıcılar üzerinden yoğun trafik döner. Bu sistemlere özel filtreleme yapmak performansı artırır:
+
+```sql
+SELECT sql_id, 
+       total_elapsed_time, 
+       executions, 
+       rows_return_per_exec,
+       sql_fulltext
+FROM (
+    SELECT f.sql_id,
+           f.elapsed_time_total / 1000000 AS total_elapsed_time,
+           f.executions_total AS executions,
+           f.rows_processed_total / DECODE(f.executions_total, 0, 1, f.executions_total) AS rows_return_per_exec,
+           s.sql_fulltext
+    FROM dba_hist_sqlstat f
+    JOIN v$sql s ON f.sql_id = s.sql_id
+    WHERE f.parsing_schema_name IN ('SADMIN', 'WEBAUTH')
+    ORDER BY total_elapsed_time DESC
+)
+WHERE ROWNUM <= 20;
+```
+
+---
+
+## 3. Performans Utility Scripti (Hızlı Check-up)
+
+DBA'nın her gün çalıştırabileceği, son 1 saatteki en yoğun SQL'leri saptayan özet sorgu:
+
+```sql
+SELECT * FROM (
+    SELECT sql_id,
+           executions,
+           ROUND(elapsed_time / 1000000, 2) AS elapsed_sec,
+           ROUND(cpu_time / 1000000, 2) AS cpu_sec,
+           buffer_gets,
+           disk_reads,
+           last_active_time,
+           SUBSTR(sql_text, 1, 100) AS short_text
+    FROM v$sql
+    WHERE parsing_schema_name NOT IN ('SYS', 'SYSTEM', 'DBSNMP')
+      AND last_active_time > SYSDATE - 1/24 -- Son 1 saat
+    ORDER BY elapsed_time DESC
+)
+WHERE ROWNUM <= 20;
+```
+
+---
+
+## Analiz Sonrası Çözüm Adımları
+
+Top Query listesinde bir SQL tespit ettiğinizde:
+
+1.  **Profil Oluşturma:** Eğer plan kararsızsa `SQL Tuning Advisor` çalıştırın.
+2.  **Bind Variable:** Literal kullanılan sorguları tespit edip bind variable önerin.
+3.  **Index Analizi:** `Rows processed` yüksek ama `Buffer gets` çok daha yüksekse (Index scan yerine Full Scan varsa) index eklemeyi düşünün.
+4.  **Parallel Execution:** Çok büyük sorgular için parallel derecesini kontrol edin.
+
+## Özet
+
+Top Query analizi, veritabanının üzerindeki iş yükünün şeffaflaşmasını sağlar. Sistemin kaynaklarını kimin tükettiğini bildiğinizde, optimizasyon çalışmalarınızı doğru noktaya kanalize edebilir ve sistem kapasitesini çok daha verimli kullanabilirsiniz.

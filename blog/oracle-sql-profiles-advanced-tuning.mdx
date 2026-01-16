@@ -1,0 +1,551 @@
+---
+title: "Oracle SQL Profile: İleri Seviye SQL Performans Tuning Rehberi"
+description: "Uygulama koduna müdahale etmeden Oracle SQL Profile ile execution planları stabilize etme, tarihsel planları geri çağırma ve performans tuning teknikleri."
+date: "2025-01-16"
+category: "Performans"
+tags: ["SQL Tuning", "SQL Profile", "Oracle DBA", "Performance", "Execution Plan"]
+author: "Oracle DBA"
+coverImage: "/images/placeholder.png"
+---
+
+# Oracle SQL Profile: İleri Seviye SQL Performans Tuning Rehberi
+
+Oracle veritabanlarında performans iyileştirme süreçleri her zaman uygulama koduna müdahale etmeyi gerektirmez. Özellikle üçüncü parti yazılımlar veya karmaşık ERP sistemlerinde (SAP, Oracle EBS gibi) kod değişikliği yapmak hem riskli hem de zaman alıcıdır. İşte tam bu noktada **Oracle SQL Profile** teknolojisi devreye girer. SQL Profile, veritabanı seviyesinde execution planları stabilize etmek ve "yanlış yola sapan" sorguları doğru plana zorlamak için en etkili araçlardan biridir.
+
+
+<!--truncate-->
+Bu makalede, Oracle DBA'lerin en güçlü silahlarından biri olan SQL Profile'ları nasıl oluşturacağınızı, AWR verilerini kullanarak tarihsel planları nasıl geri çağıracağınızı ve en karmaşık performans sorunlarını "kod yazmadan" nasıl çözeceğinizi adım adım inceleyeceğiz.
+
+<Callout type="info">
+**Stratejik Not:** SQL Profile, bir sorgunun Execution Plan'ını optimize etmek için Optimizer'a ek istatistikler ve yönlendirmeler sağlar. SQL Plan Baseline'dan farklı olarak, daha esnek bir yapı sunar ve "Force Matching" özelliği sayesinde bind variable kullanmayan uygulamalar için hayat kurtarıcıdır.
+</Callout>
+
+## Giriş
+
+SQL Profile'ler, özellikle production ortamlarında uygulama kodunu değiştirmeden performans sorunlarını çözmek için kullanılan etkili bir yöntemdir. Bu makalede, Kerry Osborne'un ünlü script'ini kullanarak AWR (Automatic Workload Repository) verilerinden SQL Profile oluşturma tekniklerini detaylı şekilde inceleyeceğiz.
+
+### SQL Profile Avantajları
+
+- ✅ **Uygulama kodu değişikliği gerektirmez** - Database seviyesinde müdahale
+- ✅ **AWR tarihsel verilerini kullanır** - Geçmişte iyi çalışan planları geri yükleyebilir
+- ✅ **Force Matching özelliği** - Literal değerleri farklı olan benzer SQL'leri kapsar
+- ✅ **Kolay yönetim** - Enable/disable/drop işlemleri basit
+- ✅ **SQL Plan Baseline'dan daha esnek** - Daha fazla kontrol imkanı
+
+## SQL Profile Oluşturma Yöntemleri
+
+### 1. AWR'den SQL Profile Oluşturma
+
+En yaygın kullanılan yöntem, AWR'deki tarihsel execution planlarından SQL Profile oluşturmaktır. Bu yöntem, bir SQL'in geçmişte iyi çalıştığı bir planını geri yüklemek için idealdir.
+
+```sql
+----------------------------------------------------------------------------------------
+-- File name:   create_sql_profile_awr.sql
+-- Author:      Kerry Osborne
+-- Purpose:     Create SQL Profile based on Outline hints from AWR
+----------------------------------------------------------------------------------------
+
+set feedback off
+set sqlblanklines on
+
+accept sql_id -
+       prompt 'Enter value for sql_id: ' -
+       default 'X0X0X0X0'
+accept plan_hash_value -
+       prompt 'Enter value for plan_hash_value: '
+accept profile_name -
+       prompt 'Enter value for profile_name (PROF_sqlid_planhash): ' -
+       default 'X0X0X0X0'
+accept category -
+       prompt 'Enter value for category (DEFAULT): ' -
+       default 'DEFAULT'
+accept force_matching -
+       prompt 'Enter value for force_matching (FALSE): ' -
+       default 'false'
+
+declare
+  ar_profile_hints sys.sqlprof_attr;
+  cl_sql_text clob;
+  l_profile_name varchar2(30);
+begin
+  -- Outline hints from AWR history
+  select
+    extractvalue(value(d), '/hint') as outline_hints
+    bulk collect into
+    ar_profile_hints
+  from
+    xmltable('/*/outline_data/hint'
+      passing (
+        select
+          xmltype(other_xml) as xmlval
+        from
+          dba_hist_sql_plan
+        where
+          sql_id = '&&sql_id'
+          and plan_hash_value = &&plan_hash_value
+          and other_xml is not null
+      )
+    ) d;
+
+  -- SQL text from AWR
+  select
+    sql_text,
+    decode('&&profile_name','X0X0X0X0','PROF_&&sql_id'||'_'||'&&plan_hash_value','&&profile_name')
+  into
+    cl_sql_text, l_profile_name
+  from
+    dba_hist_sqltext
+  where
+    sql_id = '&&sql_id';
+
+  -- Create SQL Profile
+  dbms_sqltune.import_sql_profile(
+    sql_text => cl_sql_text,
+    profile => ar_profile_hints,
+    category => '&&category',
+    name => l_profile_name,
+    force_match => &&force_matching
+  );
+
+  dbms_output.put_line('SQL Profile '||l_profile_name||' created.');
+  dbms_output.put_line(' ');
+
+exception
+  when NO_DATA_FOUND then
+    dbms_output.put_line(' ');
+    dbms_output.put_line('No data found.');
+    dbms_output.put_line(' ');
+end;
+/
+
+undefine sql_id
+undefine plan_hash_value
+undefine profile_name
+undefine category
+undefine force_matching
+```
+
+#### Kullanım Örneği
+
+```sql
+-- Önce AWR'de hangi planların mevcut olduğunu kontrol edin
+SELECT sql_id,
+       plan_hash_value,
+       executions_total,
+       elapsed_time_total/1000000 as elapsed_sec,
+       cpu_time_total/1000000 as cpu_sec,
+       buffer_gets_total
+FROM   dba_hist_sqlstat
+WHERE  sql_id = '5xqm3n6t5k8b2'
+ORDER BY plan_hash_value;
+
+-- En iyi performans gösteren planı seçin
+-- Örneğin plan_hash_value = 1234567890 çok iyi çalışmış
+
+-- Script'i çalıştırın
+@create_sql_profile_awr.sql
+
+-- Prompt'lara cevap verin:
+-- Enter value for sql_id: 5xqm3n6t5k8b2
+-- Enter value for plan_hash_value: 1234567890
+-- Enter value for profile_name: PROF_GOOD_PLAN
+-- Enter value for category: DEFAULT
+-- Enter value for force_matching: false
+```
+
+<Callout type="warning">
+**AWR Retention Dikkati**
+SQL Profile oluşturmak istediğiniz plan AWR'de hala mevcut olmalıdır. AWR retention süresi genellikle 8 gündür (default). Daha eski planlar için bu yöntem çalışmayabilir.
+</Callout>
+
+### 2. Force Matching ile SQL Profile
+
+Force Matching özelliği, literal değerleri farklı olan ancak aynı yapıya sahip SQL ifadelerine aynı SQL Profile'ın uygulanmasını sağlar. Bu, bind variable kullanmayan uygulamalar için çok önemlidir.
+
+```sql
+-- Force Matching ile SQL Profile oluşturma
+@create_sql_profile_awr.sql
+
+-- Force matching için:
+-- Enter value for force_matching: TRUE
+```
+
+#### Force Matching Örneği
+
+Aşağıdaki SQL'leri düşünün:
+
+```sql
+-- Bu üç SQL de aynı planı kullanmalı ama normalde farklı SQL_ID'ler:
+SELECT * FROM orders WHERE order_id = 1001;
+SELECT * FROM orders WHERE order_id = 1002;
+SELECT * FROM orders WHERE order_id = 1003;
+```
+
+Force Matching = TRUE ile oluşturulan SQL Profile, bu üç SQL'e de otomatik uygulanır.
+
+```sql
+-- Force Match kontrolü
+SELECT name,
+       category,
+       force_matching,
+       created,
+       last_modified
+FROM   dba_sql_profiles
+WHERE  name = 'PROF_5xqm3n6t5k8b2_1234567890';
+```
+
+### 3. Shared Pool'dan SQL Profile Oluşturma
+
+Eğer SQL henüz AWR'de yoksa (çekilmiş değilse), shared pool'dan da SQL Profile oluşturabilirsiniz:
+
+```sql
+declare
+  ar_profile_hints sys.sqlprof_attr;
+  cl_sql_text clob;
+begin
+  -- V$SQL'den outline hints al
+  select
+    extractvalue(value(d), '/hint') as outline_hints
+    bulk collect into
+    ar_profile_hints
+  from
+    xmltable('/*/outline_data/hint'
+      passing (
+        select
+          xmltype(other_xml) as xmlval
+        from
+          v$sql_plan
+        where
+          sql_id = '&&sql_id'
+          and child_number = &&child_number
+          and other_xml is not null
+      )
+    ) d;
+
+  -- SQL text'i al
+  select
+    sql_text
+  into
+    cl_sql_text
+  from
+    v$sql
+  where
+    sql_id = '&&sql_id'
+    and child_number = &&child_number;
+
+  -- SQL Profile oluştur
+  dbms_sqltune.import_sql_profile(
+    sql_text => cl_sql_text,
+    profile => ar_profile_hints,
+    name => 'PROF_SP_&&sql_id'
+  );
+end;
+/
+```
+
+## Execution Plan Karşılaştırma ve Seçimi
+
+Hangi planın kullanılacağını seçmeden önce detaylı analiz yapmalısınız:
+
+```sql
+-- Plan performans karşılaştırması
+WITH plan_stats AS (
+  SELECT
+    sql_id,
+    plan_hash_value,
+    executions_total,
+    elapsed_time_total/1000000 as elapsed_sec,
+    cpu_time_total/1000000 as cpu_sec,
+    buffer_gets_total,
+    disk_reads_total,
+    row_wait_total,
+    executions_total/executions_delta as exec_per_snap
+  FROM dba_hist_sqlstat
+  WHERE sql_id = '5xqm3n6t5k8b2'
+)
+SELECT
+  plan_hash_value,
+  ROUND(elapsed_sec/NULLIF(executions_total,0),4) as avg_elapsed_sec,
+  ROUND(cpu_sec/NULLIF(executions_total,0),4) as avg_cpu_sec,
+  ROUND(buffer_gets_total/NULLIF(executions_total,0),2) as avg_buffer_gets,
+  executions_total as total_execs
+FROM plan_stats
+ORDER BY avg_elapsed_sec;
+```
+
+### Plan Detaylarını İnceleme
+
+```sql
+-- Plan detayları
+SELECT plan_line_id,
+       operation,
+       options,
+       object_name,
+       cost,
+       cardinality,
+       bytes,
+       cpu_cost,
+       io_cost
+FROM   dba_hist_sql_plan
+WHERE  sql_id = '5xqm3n6t5k8b2'
+AND    plan_hash_value = 1234567890
+ORDER BY plan_line_id;
+```
+
+## SQL Profile Yönetimi
+
+### Mevcut SQL Profile'ları Listeleme
+
+```sql
+-- Tüm SQL Profile'lar
+SELECT name,
+       category,
+       sql_text,
+       created,
+       last_modified,
+       description,
+       type
+FROM   dba_sql_profiles
+ORDER BY created DESC;
+```
+
+### SQL Profile Hints'lerini Görüntüleme
+
+```sql
+-- Profile içindeki hints
+SELECT name,
+       category,
+       hint
+FROM   dba_sql_profiles
+CROSS JOIN TABLE(xmlsequence(extract(xmltype(comp_data),
+                                      '//hint'))) h
+WHERE  name = 'PROF_5xqm3n6t5k8b2_1234567890';
+```
+
+<Callout type="success">
+**Hint İnceleme Önemli**
+SQL Profile oluşturmadan önce, hangi hints'in içeriğini mutlaka inceleyin. Bu sayede planın neden farklı davrandığını anlayabilirsiniz.
+</Callout>
+
+### SQL Profile'ı Enable/Disable Yapma
+
+```sql
+-- Profile disable et
+BEGIN
+  DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+    name => 'PROF_5xqm3n6t5k8b2_1234567890',
+    attribute_name => 'STATUS',
+    value => 'DISABLED'
+  );
+END;
+/
+
+-- Profile enable et
+BEGIN
+  DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+    name => 'PROF_5xqm3n6t5k8b2_1234567890',
+    attribute_name => 'STATUS',
+    value => 'ENABLED'
+  );
+END;
+/
+```
+
+### SQL Profile Kaldırma
+
+```sql
+-- Profile drop et
+BEGIN
+  DBMS_SQLTUNE.DROP_SQL_PROFILE(
+    name => 'PROF_5xqm3n6t5k8b2_1234567890'
+  );
+END;
+/
+```
+
+### Category ile Yönetim
+
+Farklı kategoriler oluşturarak test ve production ortamlarını ayırabilirsiniz:
+
+```sql
+-- Test category'si ile profile oluştur
+-- create_sql_profile_awr.sql'de category = 'TEST'
+
+-- Session seviyesinde category değiştirme
+ALTER SESSION SET sql_profile = 'TEST';
+
+-- Profile category değiştirme
+BEGIN
+  DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+    name => 'PROF_5xqm3n6t5k8b2_1234567890',
+    attribute_name => 'CATEGORY',
+    value => 'PRODUCTION'
+  );
+END;
+/
+```
+
+## SQL Profile Export ve Import
+
+Farklı ortamlar arasında SQL Profile taşıma:
+
+```sql
+-- 1. Profile export et (staging)
+SET LONG 100000
+SET PAGESIZE 0
+SET LINESIZE 200
+SPO prof_export.sql
+
+SELECT 'BEGIN DBMS_SQLTUNE.IMPORT_SQL_PROFILE(' ||
+       'sql_text => ''' || REPLACE(sql_text, '''', '''''') || ''',' ||
+       'profile => sys.sqlprof_attr(' ||
+       (SELECT LISTAGG(''''||hint||'''', ',')
+          FROM TABLE(xmlsequence(extract(xmltype(comp_data), '//hint'))))
+       || '),' ||
+       'name => ''' || name || ''',' ||
+       'category => ''' || category || ''',' ||
+       'force_match => ' ||
+       (SELECT CASE WHEN force_matching = 'YES'
+                   THEN 'TRUE' ELSE 'FALSE' END
+          FROM dba_sql_profiles
+          WHERE name = p.name)
+       || '); END;'
+FROM   dba_sql_profiles p
+WHERE  name = 'PROF_5xqm3n6t5k8b2_1234567890';
+
+SPO OFF
+```
+
+Oluşan `prof_export.sql` dosyasını target environment'da çalıştırın.
+
+## SQL Tuning Advisor ile Entegrasyon
+
+Oracle'ın SQL Tuning Advisor'ı da otomatik olarak SQL Profile önerebilir:
+
+```sql
+-- SQL Tuning Task oluştur
+DECLARE
+  l_task_name VARCHAR2(30);
+  l_sql_id    VARCHAR2(13) := '5xqm3n6t5k8b2';
+BEGIN
+  l_task_name := DBMS_SQLTUNE.CREATE_TUNING_TASK(
+    sql_id => l_sql_id,
+    scope => DBMS_SQLTUNE.SCOPE_COMPREHENSIVE,
+    time_limit => 3600,
+    task_name => 'tune_task_' || l_sql_id,
+    description => 'Tune SQL with ID: ' || l_sql_id
+  );
+
+  DBMS_SQLTUNE.EXECUTE_TUNING_TASK(task_name => l_task_name);
+END;
+/
+
+-- Tuning task sonucunu görüntüle
+SELECT dbms_sqltune.report_tuning_task('tune_task_5xqm3n6t5k8b2')
+FROM   dual;
+
+-- Eğer SQL Profile önerildiyse, accept et
+BEGIN
+  DBMS_SQLTUNE.ACCEPT_SQL_PROFILE(
+    task_name => 'tune_task_5xqm3n6t5k8b2',
+    name => 'PROF_STA_5xqm3n6t5k8b2',
+    replace => TRUE
+  );
+END;
+/
+```
+
+## Best Practices
+
+### 1. Test Etmeden Production'a Koyma
+
+Her SQL Profile öncelikle test ortamında doğrulanmalıdır.
+
+### 2. İsimlendirme Standardı
+
+```sql
+-- Önerilen naming convention
+-- PROF_<sql_id>_<plan_hash_value>
+-- Örnek: PROF_5xqm3n6t5k8b2_1234567890
+```
+
+### 3. Dokümantasyon
+
+Her oluşturulan SQL Profile için aşağıdaki bilgileri dokümante edin:
+
+- Oluşturma tarihi
+- SQL_ID ve plan hash value
+- Oluşturma nedeni
+- Test sonuçları
+- Onaylayan kişiler
+
+### 4. Periyodik İnceleme
+
+```sql
+-- Kullanılmayan SQL Profile'ları bul
+SELECT name,
+       created,
+       last_executed
+FROM   dba_sql_profiles
+WHERE  created < SYSDATE - 90
+AND    last_executed IS NULL;
+```
+
+### 5. SQL Profile vs SQL Plan Baseline
+
+| Özellik | SQL Profile | SQL Plan Baseline |
+|---------|-------------|-------------------|
+| Esneklik | Yüksek | Orta |
+| Plan Stabilizasyonu | Force matching | Sadece exact match |
+| Kullanım Kolaylığı | Basit | Orta |
+| Evolution Desteği | Yok | Var |
+| Capture Mechanism | Manuel | Otomatik + Manuel |
+
+## Troubleshooting
+
+### SQL Profile Çalışmıyorsa
+
+```sql
+-- 1. Profile'nin ENABLED olduğunu kontrol et
+SELECT name, status, category
+FROM   dba_sql_profiles
+WHERE  name = 'PROF_5xqm3n6t5k8b2_1234567890';
+
+-- 2. SQL text'in tam eşleştiğini kontrol et
+SELECT sql_text
+FROM   dba_sql_profiles
+WHERE  name = 'PROF_5xqm3n6t5k8b2_1234567890';
+
+-- 3. Category'nin doğru olduğunu kontrol et
+SELECT name, category
+FROM   dba_sql_profiles
+WHERE  name = 'PROF_5xqm3n6t5k8b2_1234567890';
+
+SELECT value
+FROM   v$parameter
+WHERE  name = 'sql_profile';
+```
+
+### Plan Değişti mi Kontrolü
+
+```sql
+-- Profile ile planın kullanıldığını kontrol et
+SELECT sql_id,
+       plan_hash_value,
+       sql_profile,
+       child_number
+FROM   v$sql
+WHERE  sql_id = '5xqm3n6t5k8b2'
+ORDER BY child_number DESC;
+```
+
+## İlgili Kaynaklar
+
+- [Oracle Database SQL Tuning Guide](https://docs.oracle.com/en/database/oracle/oracle-database/)
+- Kerry Osborne's Blog: Oracle SQL Profiles
+- [Oracle AWR Report Analysis](/blog/oracle-performance-monitoring-scripts)
+
+<Callout type="info">
+**Özet**
+SQL Profile'lar, Oracle performans tuning araçları arasında en esnek ve etkili olanlardan biridir. Özellikle production ortamlarında uygulama kodunu değiştirmeden hızlı ve güvenli bir şekilde performans sorunlarını çözmek için ideal bir çözümdür.
+</Callout>

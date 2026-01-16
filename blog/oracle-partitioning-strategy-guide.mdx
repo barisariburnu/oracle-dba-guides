@@ -1,0 +1,91 @@
+---
+title: "Oracle Partitioning: Range, List ve Interval Yöntemleri"
+description: "Oracle veritabanında büyük tabloları yönetmek için partisyonlama (partitioning) teknikleri, Range ve List partitioning farkları ve 11g ile gelen Interval Partitioning ile otomatik yönetim."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Partitioning", "Interval Partitioning", "Range Partitioning", "Database Performance", "Maintenance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Partitioning: Range, List ve Interval Yöntemleri
+
+Milyarlarca satır içeren devasa tablolarla çalışırken, basit bir sorgunun bile dakikalar sürmesi veya bir index bakımının saatler alması kaçınılmazdır. Oracle **Partitioning** (Bölümleme) özelliği, büyük tabloları mantıksal olarak daha küçük ve yönetilebilir parçalara ayırarak bu sorunu çözer. Bu sayede hem sorgu performansı artar (`Partition Pruning`) hem de bakım işlemleri sadece ilgili parça üzerinde yapılarak zaman kazanılır. Bu makalede en yaygın partisyonlama yöntemlerini ve 11g ile gelen devrimsel **Interval Partitioning** özelliğini inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Range Partitioning (Aralık Bölümleme)
+
+En temel ve yaygın yöntemdir. Veriler, belirli bir kolonun (genellikle tarih) değer aralıklarına göre bölünür.
+
+```sql
+CREATE TABLE satislar (
+    id NUMBER,
+    satis_tarihi DATE
+)
+PARTITION BY RANGE (satis_tarihi) (
+    PARTITION p_2023_q1 VALUES LESS THAN (TO_DATE('01-04-2023', 'DD-MM-YYYY')),
+    PARTITION p_2023_q2 VALUES LESS THAN (TO_DATE('01-07-2023', 'DD-MM-YYYY')),
+    PARTITION p_max VALUES LESS THAN (MAXVALUE)
+);
+```
+
+---
+
+## 2. Interval Partitioning (Otomatik Bölümleme)
+
+Oracle 11g öncesinde, yeni gelen veriler için manuel olarak yeni partisyonlar eklemek zorundaydınız. **Interval Partitioning**, Range partitioning'in bir uzantısıdır ve yeni bir aralığa veri geldiğinde partisyonu otomatik olarak oluşturur.
+
+```sql
+CREATE TABLE satislar_auto (
+    id NUMBER,
+    satis_tarihi DATE
+)
+PARTITION BY RANGE (satis_tarihi)
+INTERVAL (NUMTOYMINTERVAL(1, 'MONTH')) -- Her ay otomatik yeni partisyon aç
+(
+    PARTITION p_ilk VALUES LESS THAN (TO_DATE('01-01-2023', 'DD-MM-YYYY'))
+);
+```
+*Bu sayede "ORA-14400: inserted partition key does not map to any partition" hatasından sonsuza dek kurtulursunuz.*
+
+---
+
+## 3. List Partitioning (Liste Bölümleme)
+
+Verilerin belirli bir listedeki değerlere göre (örn: Şehir, Ülke, Departman) ayrılmasıdır.
+
+```sql
+CREATE TABLE subeler (
+    id NUMBER,
+    sehir VARCHAR2(50)
+)
+PARTITION BY LIST (sehir) (
+    PARTITION p_marmara VALUES ('ISTANBUL', 'BURSA', 'KOCAELI'),
+    PARTITION p_ege VALUES ('IZMIR', 'AYDIN'),
+    PARTITION p_diger VALUES (DEFAULT)
+);
+```
+
+---
+
+## 4. Partisyonları İzleme ve Analiz
+
+Hangi tabloda kaç partisyon olduğunu ve verilerin hangi partisyonlara dağıldığını şu sorgularla görebilirsiniz:
+
+```sql
+-- Partisyon listesini ve satır sayılarını gör
+SELECT table_name, partition_name, high_value, num_rows
+FROM user_tab_partitions
+WHERE table_name = 'SATISLAR_AUTO';
+
+-- Belirli bir partisyonu sorgulama
+SELECT * FROM satislar_auto PARTITION (P_ILK);
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Partition Pruning:** Sorgularınızda mutlaka partisyon anahtarını (`WHERE` clause) kullanın. Oracle bu sayede diğer tüm partisyonları görmezden gelerek sadece ilgili parçayı okur ve muazzam hız kazanır.
+-   **Local vs Global Index:** Büyük tablolarda her partisyon için ayrı bir index parçası tutan `LOCAL` indexleri tercih etmek, bakım kolaylığı açısından (örn: bir partisyonu drop ederken) daha avantajlıdır.
+-   **Compression:** Eski (tarihsel) partisyonları `ALTER TABLE ... MOVE PARTITION ... COMPRESS` komutu ile sıkıştırarak disk alanından %50-80 oranında tasarruf edebilirsiniz.
+
+Partitioning sadece bir performans aracı değil, aynı zamanda veri yönetim stratejinizin kalbidir.

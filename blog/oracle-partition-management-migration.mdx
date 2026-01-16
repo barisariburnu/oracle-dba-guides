@@ -1,0 +1,101 @@
+---
+title: "Oracle Partition Yönetimi: Veri Taşıma ve Bakım Stratejileri"
+description: "Oracle veritabanında büyük partisyonları bir tablodan diğerine taşıma, veritabanları arası parça bazlı (partition-based) veri aktarımı ve özel PL/SQL fonksiyonları ile dinamik yönetim."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Partitioning", "Data Migration", "PL/SQL", "Partition Maintenance", "DBLink", "DBA Tasks"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Partition Yönetimi: Veri Taşıma ve Bakım Stratejileri
+
+Büyük veri kütlelerine sahip ortamlarda, verinin tamamını değil de sadece belirli bir zaman dilimine ait parçayı (partition) başka bir veritabanına taşımak veya arşivlemek sık karşılaşılan bir ihtiyaçtır. Örneğin; "Sadece geçen ayın log verilerini raporlama veritabanına taşıyalım" dendiğinde, milyarlarca satır arasından filtreleme yapmak yerine doğrudan ilgili partisyon üzerinde çalışmak çok daha verimlidir. Bu makalede, dinamik olarak partisyon ismini bulan ve bu parçayı DBLink üzerinden taşıyan profesyonel bir yöntemi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Dinamik Partisyon İsmi Bulma
+
+Oracle'da sistem tarafından otomatik oluşturulan (Interval) partisyon isimleri genellikle `SYS_P123` gibi anlamsızdır. Belirli bir tarihe ait verinin hangi partisyonda olduğunu bulmak için `HIGH_VALUE` kolonunu parse eden bir fonksiyon kullanabiliriz.
+
+```sql
+CREATE OR REPLACE FUNCTION sys.find_partition_by_date (
+    tname IN VARCHAR2, 
+    sdate IN DATE 
+) RETURN VARCHAR2 IS
+    v_parname VARCHAR2(100);
+BEGIN
+    -- Bu fonksiyon, verilen tarihin içinde bulunduğu partisyon ismini döner
+    -- Basitleştirilmiş mantık:
+    SELECT partition_name INTO v_parname
+    FROM dba_tab_partitions
+    WHERE table_name = tname
+    AND TO_DATE(SUBSTR(high_value, 11, 10), 'YYYY-MM-DD') > sdate
+    AND ROWNUM = 1; -- En yakın üst sınırı bulur
+
+    RETURN v_parname;
+END;
+/
+```
+
+---
+
+## 2. Partisyon Bazlı View Oluşturma
+
+Veri aktarımı yaparken tüm tablo üzerinde filtre (`WHERE date = ...`) kullanmak yerine, sadece ilgili partisyonu seçen bir `VIEW` oluşturmak performans açısından çok daha sağlıklıdır.
+
+```sql
+-- Örnek: Eylül 2023 partisyonu için view oluşturma
+CREATE OR REPLACE VIEW sales_sept_view AS 
+SELECT * FROM sales PARTITION (P_2023_SEP);
+```
+
+---
+
+## 3. DBLink Üzerinden Parça Aktarımı
+
+Hedef veritabanında, kaynaktaki bu view'ı okuyarak verileri toplu (bulk) şekilde insert edebilirsiniz.
+
+```sql
+DECLARE
+  v_counter NUMBER := 0;
+BEGIN
+  -- DBLink üzerinden kaynak taranır
+  FOR rec IN (SELECT * FROM sales_sept_view@PROD_DB) LOOP
+    BEGIN
+      INSERT INTO sales_archive VALUES rec;
+      v_counter := v_counter + 1;
+      
+      -- Her 5000 satırda bir commit
+      IF v_counter >= 5000 THEN
+        COMMIT;
+        v_counter := 0;
+      END IF;
+    EXCEPTION WHEN DUP_VAL_ON_INDEX THEN
+      NULL; -- Zaten varsa atla
+    END;
+  END LOOP;
+  COMMIT;
+END;
+/
+```
+
+---
+
+## 4. Partition Maintenance (Bakım) İşlemleri
+
+Partisyonlar üzerinde yapılan diğer yaygın işlemler:
+
+-   **Drop Partition:** Eski verileri saniyeler içinde siler.
+    `ALTER TABLE sales DROP PARTITION p_2020_data;`
+-   **Truncate Partition:** Verileri siler ama partisyon yapısını tutar.
+    `ALTER TABLE sales TRUNCATE PARTITION p_2023_temp;`
+-   **Move Partition:** Partisyonu başka bir tablespace'e taşır (veya sıkıştırır).
+    `ALTER TABLE sales MOVE PARTITION p_old_data TABLESPACE archive_ts COMPRESS;`
+
+## Özet ve En İyi Uygulamalar
+
+-   **Metadata Analizi:** `dba_tab_partitions` tablosundaki `HIGH_VALUE` kolonu `LONG` tipindedir ve doğrudan SQL içinde parse edilemez. PL/SQL içinde `xmlgen` veya string manipülasyonu gerekebilir.
+-   **Logging:** Büyük aktarımlarda `NOLOGGING` modunu kullanarak redo log üretimini azaltabilir ve hızı artırabilirsiniz.
+-   **Index Durumu:** Partisyon operasyonlarından sonra `UNUSABLE` duruma düşen indexleri mutlaka rebuild edin.
+
+Partisyon yönetimi, verinin yaşam döngüsü (ILM - Information Lifecycle Management) için DBA'nın en esnek ve güçlü silahıdır.

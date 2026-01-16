@@ -1,0 +1,89 @@
+---
+title: "Oracle DBA İçin Temel Unix/Linux Komutları ve Sistem İzleme"
+description: "Oracle veritabanı sunucularında (AIX, Linux) CPU tüketen süreçleri bulma, bellek analizi, disk yönetimi ve OS seviyesinde sorun giderme komutları."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Unix", "Linux", "AIX", "OS Monitoring", "DBA", "Shell Commands"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle DBA İçin Temel Unix/Linux Komutları
+
+Bir veritabanı yöneticisi için işletim sistemi (OS), veritabanının üzerinde koştuğu evdir. Evdeki sorunları (CPU darboğazı, bellek yetersizliği, disk doluluğu) anlamadan veritabanı performansını tam olarak optimize edemezsiniz. Bu makalede, özellikle AIX ve Linux sistemlerde bir DBA'in en sık kullandığı OS komutlarını inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. CPU Tüketen Süreçleri Bulma
+
+Veritabanı sunucusunda yük (load) arttığında, hangi Oracle sürecinin (PID) bu yükü oluşturduğunu bulmak ilk adımdır.
+
+### Linux/AIX Genel Komutlar:
+```bash
+# En çok CPU tüketen ilk 10 süreci listele (Linux)
+ps aux | sort -rn -k 3 | head -10
+
+# AIX için benzer komut
+ps aux | head -1; ps aux | sort -rn +2 | head -10
+
+# Top komutu (Linux) veya topas (AIX) interaktif izleme sağlar
+top -u oracle
+```
+
+---
+
+## 2. Bellek (Memory) Analizi
+
+İşletim sistemi seviyesinde boş bellek miktarını ve `Swap` kullanımını görmek için:
+
+```bash
+# Linux
+free -m
+
+# AIX
+vmstat -I 2 10
+svmon -G
+```
+*Not: Eğer `Swap` kullanımı yüksekse, bu durum veritabanı performansını ciddi oranda düşürür (SGA/PGA'nın diske yazılması).*
+
+---
+
+## 3. Disk ve I/O İzleme
+
+Veritabanı dosyalarının bulunduğu disklerin hızını ve doluluğunu kontrol etmek:
+
+```bash
+# Disk doluluk oranları
+df -h
+
+# Gerçek zamanlı I/O izleme (Linux)
+iostat -xz 1 10
+
+# AIX için disk I/O analizi
+iostat 2 5
+```
+
+---
+
+## 4. Oracle Süreçlerini (PID) Yönetme
+
+Bazen veritabanı içinden `kill` edemediğiniz bir oturumu OS seviyesinde sonlandırmanız gerekebilir.
+
+```bash
+# Bir Oracle sürecini sessizce sonlandır (Graceful)
+kill -15 <PID>
+
+# Zorla sonlandır (Sadece çok gerekliyse!)
+kill -9 <PID>
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Log Dosyaları:** Oracle loglarının (alert, listener, audit) sunucu diskini doldurmasını engellemek için `find` komutuyla düzenli temizlik yapın.
+    ```bash
+    # 30 günden eski audit dosyalarını sil
+    find /u01/app/oracle/admin/orcl/adump -name "*.aud" -mtime +30 -exec rm {} \;
+    ```
+-   **Kullanıcı Sınırları (ulimit):** Veritabanı kullanıcısının OS seviyesindeki limitlerini (`ulimit -a`) mutlaka kontrol edin (Open files, Max user processes vb.).
+-   **Zombi Süreçler:** `ps -ef | grep defunc` komutuyla zombi süreçleri takip edin.
+
+İşletim sistemine hakim bir DBA, sorunların kaynağını çok daha hızlı tespit eder ve veritabanını daha stabil bir zeminde yönetir.

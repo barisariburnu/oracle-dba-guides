@@ -1,0 +1,76 @@
+---
+title: "Oracle Veritabanı Adı Değiştirme (DBNEWID - nid Kullanımı)"
+description: "Oracle veritabanında DBID ve DBNAME değerlerini DBNEWID (nid) aracı ile değiştirme rehberi, adım adım konfigürasyon ve RESETLOGS süreci."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle DBNEWID", "nid tool", "Change DBNAME", "DBID", "Database Maintenance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Adı Değiştirme (DBNEWID - nid Kullanımı)
+
+Bazı durumlarda (veritabanı klonlama, isim standartlarının değişmesi vb.) Oracle veritabanının adını (`DBNAME`) veya kimlik numarasını (`DBID`) değiştirmek gerekebilir. Manuel olarak control file'ları yeniden oluşturmak bir yöntem olsa da, Oracle'ın sunduğu **DBNEWID (nid)** aracı bu işlemi çok daha güvenli ve hızlı bir şekilde gerçekleştirir. Bu makalede, `nid` aracını kullanarak bir veritabanının adını nasıl değiştireceğinizi adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Hazırlık ve Gereksinimler
+
+-   İşlem öncesi mutlaka tam bir veritabanı yedeği (Full Backup) alınmalıdır. Çünkü `DBID` değiştiğinde tüm eski yedekler ve arşiv logları geçersiz hale gelir.
+-   Veritabanı `MOUNT` modunda olmalıdır.
+
+```sql
+SQL> SHUTDOWN IMMEDIATE;
+SQL> STARTUP MOUNT;
+```
+
+---
+
+## 2. nid Aracını Çalıştırma
+
+Terminal üzerinden (Oracle kullanıcısı ile) `nid` komutunu hedef veritabanı ve yeni isim parametreleriyle çalıştırın:
+
+```bash
+# nid TARGET=Kullanici/Sifre DBNAME=YENI_AD
+nid TARGET=SYS/oracle DBNAME=CLONE
+```
+
+İşlem sırasında size onay sorulacaktır. `Y` diyerek devam ettiğinizde `nid`:
+-   Tüm veri dosyalarının (Datafiles) başlıklarındaki DBID bilgisini günceller.
+-   Control file'lardaki veritabanı adını değiştirir.
+-   İşlem bittiğinde instance'ı otomatik olarak kapatır.
+
+---
+
+## 3. Konfigürasyon Dosyalarını Güncelleme
+
+Veritabanı adı değiştiği için işletim sistemi seviyesindeki şu dosyaları yeni isme göre güncellemeniz gerekir:
+
+1.  **Init File (PFILE/SPFILE):** `db_name` parametresini `CLONE` olarak değiştirin.
+2.  **Environment Variables:** `ORACLE_SID` değişkenini yeni isme göre set edin (`export ORACLE_SID=CLONE`).
+3.  **Password File:** Yeni SID için şifre dosyasını yeniden oluşturun (`orapwd`).
+4.  **Network Files:** `listener.ora` ve `tnsnames.ora` dosyalarındaki SID/Service Name bilgilerini güncelleyin.
+
+---
+
+## 4. Veritabanını RESETLOGS ile Açma
+
+İsim ve DBID değişikliği sonrası veritabanı ilk kez `RESETLOGS` seçeneği ile açılmalıdır.
+
+```bash
+export ORACLE_SID=CLONE
+sqlplus / as sysdba
+
+SQL> STARTUP MOUNT;
+SQL> ALTER DATABASE OPEN RESETLOGS;
+
+-- Kontrol et
+SQL> SELECT name, dbid, open_mode FROM v$database;
+```
+
+## Özet ve Kritik Uyarılar
+
+-   **Backup Geçersizliği:** DBID değiştiği için RMAN katalogundaki eski kayıtlar artık bu veritabanına ait değildir. İşlem biter bitmez yeni bir Full Backup almalısınız.
+-   **Password File:** Şifre dosyasını (`orapwd`) güncellemeyi unutursanız uzaktan (sysdba) bağlantı hataları alırsınız.
+-   **Archive Log:** Eski arşiv loglarını manuel olarak silebilirsiniz çünkü yeni DBID ile uyumlu değillerdir.
+
+`DBNEWID` aracı, veritabanı kimliğini değiştirmek için en profesyonel yoldur. Adımları dikkatle takip ederek veritabanınıza yeni bir kimlik ve isim kazandırabilirsiniz.

@@ -1,0 +1,97 @@
+---
+title: "Oracle Data Guard Switchover ve Failover Rol Değişimi"
+description: "Data Guard ortamlarında planlı rol değişimi (Switchover) ve plansız felaket kurtarma (Failover) operasyonlarının adım adım uygulanması ve dikkat edilmesi gerekenler."
+date: 2026-01-16
+category: "Oracle Disaster Recovery"
+tags: ["oracle", "data guard", "switchover", "failover", "role transition", "dba", "high availability"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Switchover ve Failover Rol Değişimi
+
+Oracle Data Guard ortamında iki tip rol değişimi (Role Transition) vardır:
+1. **Switchover:** Planlı bir işlemdir. Primary ve Standby rolleri yer değiştirir. Veri kaybı sıfırdır.
+2. **Failover:** Plansızdır. Primary veritabanı kriz/arıza nedeniyle erişilemez olduğunda Standby'ı Primary olarak açma işlemidir.
+
+
+<!--truncate-->
+## 1. Planlı Rol Değişimi (Switchover)
+
+Switchover işlemi öncesinde her iki tarafta da logların tam olarak uygulandığından emin olunmalıdır.
+
+### Adım 1: Mevcut Primary Tarafında Hazırlık
+
+```sql
+-- Status kontrolü (TO STANDBY veya SESSIONS ACTIVE olmalı)
+SELECT switchover_status, database_role FROM v$database;
+
+-- Switchover işlemini başlat
+ALTER DATABASE COMMIT TO SWITCHOVER TO PHYSICAL STANDBY WITH SESSION SHUTDOWN;
+
+-- Instance'ı kapatıp Standby Mount modunda açın
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+ALTER DATABASE MOUNT STANDBY DATABASE;
+```
+
+### Adım 2: Mevcut Standby (Yeni Primary) Tarafında İşlem
+
+```sql
+-- Status kontrolü (TO PRIMARY veya SESSIONS ACTIVE olmalı)
+SELECT switchover_status, database_role FROM v$database;
+
+-- Primary rolüne geçiş yap
+ALTER DATABASE COMMIT TO SWITCHOVER TO PRIMARY WITH SESSION SHUTDOWN;
+
+-- Veritabanını açın
+SHUTDOWN IMMEDIATE;
+STARTUP;
+```
+
+### Adım 3: Yeni Standby'da Recovery Başlatma
+
+Eski Primary artık yeni Standby'dır. Recovery'yi başlatın:
+
+```sql
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT;
+```
+
+## 2. Felaket Kurtarma (Failover)
+
+Eğer Primary sunucusu tamamen çöktüyse ve geri gelmiyorsa Failover yapılır.
+
+### Adım 1: Son Logları Uygulama (Mümkünse)
+
+Eğer standby'a erişilebiliyorsa, varsa eksik logları tamamlayın:
+
+```sql
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE FINISH;
+```
+
+### Adım 2: Standby'ı Primary Yapma
+
+```sql
+ALTER DATABASE ACTIVATE PHYSICAL STANDBY;
+-- Veya daha güvenli yöntem:
+ALTER DATABASE COMMIT TO SWITCHOVER TO PRIMARY WITH SESSION SHUTDOWN;
+```
+
+### Adım 3: Veritabanını Açma
+
+```sql
+ALTER DATABASE OPEN;
+```
+
+<Callout type="warning" title="Önemli Not">
+Failover sonrasında eski Primary veritabanı "Inconsistent" duruma düşebilir. Bu durumda eski Primary'yi `Flashback Database` veya re-instantiate (yeniden kurulum) yaparak Standby olarak tekrar yapılandırmanız gerekebilir.
+</Callout>
+
+## Rol Değişimi Sonrası Kontroller
+
+- **Log Shipping:** Yeni Primary'den yeni Standby'a loglar gidiyor mu?
+- **Listener:** Client'lar yeni Primary'e bağlanabiliyor mu? (TAF/FCF konfigürasyonu kontrol edilmeli).
+- **Scheduled Jobs:** Job'lar yeni Primary'de aktifleşti mi?
+
+## Sonuç
+
+Switchover, sistem bakımları veya donanım güncellemeleri için mükemmel bir araçtır. Failover ise en kötü senaryoya hazırlıklı olmanızı sağlar. Her iki işlemin de periyodik olarak test (DR Test) edilmesi, gerçek bir kriz anında panik yapmamanızı sağlar.

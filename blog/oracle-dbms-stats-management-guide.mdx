@@ -1,0 +1,98 @@
+---
+title: "Oracle İstatistik Yönetimi: DBMS_STATS ile Optimizer Performansını Optimize Etme"
+description: "Oracle veritabanında CBO (Cost Based Optimizer) için kritik olan istatistiklerin yönetimi, otomatik ve manuel istatistik toplama, histogramlar ve stale stats tespiti."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle DBMS_STATS", "CBO", "Optimizer Statistics", "Histogram", "Performance Tuning", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle İstatistik Yönetimi: DBMS_STATS ile Performans Optimizasyonu
+
+Oracle Database'in beyni olan **CBO (Cost Based Optimizer)**, bir SQL sorgusu için en iyi çalışma planını (Execution Plan) seçerken elindeki istatistiklere güvenir. Eğer istatistikler güncel değilse (`Stale`), optimizer yanlış kararlar vererek performans facialarına yol açabilir. Bu makalede, Oracle'da istatistiklerin nasıl yönetildiğini, `DBMS_STATS` paketinin kullanımını ve kritik parametreleri inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Temel İstatistik Toplama (Gather Stats)
+
+En yaygın kullanılan yöntem `GATHER_TABLE_STATS` prosedürüdür. Bu komut tabloyu, kolonlarını ve bağlı indexlerini tarayarak güncel verileri toplar.
+
+```sql
+BEGIN
+  DBMS_STATS.GATHER_TABLE_STATS(
+    ownname          => 'HR',
+    tabname          => 'EMPLOYEES',
+    estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE, -- Oracle en uygun yüzdeyi seçer
+    method_opt       => 'FOR ALL COLUMNS SIZE AUTO', -- Histogram kararını Oracle'a bırak
+    cascade          => TRUE,                       -- Indexleri de topla
+    degree           => 4                           -- Paralel işlem
+  );
+END;
+/
+```
+
+---
+
+## 2. Stale Statistics Tespiti
+
+Veritabanındaki verilerin %10'undan fazlası değiştiğinde, o tabloya ait istatistikler "bayat" (`Stale`) olarak işaretlenir. Hangi tabloların acil istatistik ihtiyacı olduğunu şu sorgu ile bulabilirsiniz:
+
+```sql
+SELECT owner, table_name, last_analyzed, stale_stats 
+FROM dba_tab_statistics 
+WHERE stale_stats = 'YES';
+```
+
+---
+
+## 3. Histogramlar: Veri Dağılımını Anlama
+
+Eğer bir kolondaki veriler dengesiz dağılmışsa (örn: "Aktif" olanlar %1, "Pasif" olanlar %99), optimizer standart istatistiklerle hata yapabilir. **Histogramlar**, bu tür dengesiz dağılımları optimizer'a anlatmamızı sağlar.
+
+-   **SIZE 1:** Histogram oluşturulmaz.
+-   **SIZE AUTO:** Sadece sorgulanan kolonlarda ihtiyaç varsa oluşturulur.
+-   **SIZE 254:** En detaylı (Frequency) histogramı oluşturur.
+
+```sql
+-- Manuel olarak histogram tetikleme
+METHOD_OPT => 'FOR COLUMNS SIZE 254 STATUS_COLUMN'
+```
+
+---
+
+## 4. İstatistikleri Dondurma (Locking Statistics)
+
+Bazı kritik tablolarda, otomatik istatistik toplama işleminin planı değiştirmesini istemeyebilirsiniz. Bu durumda istatistikleri kilitleyebilirsiniz:
+
+```sql
+-- İstatistikleri kilitle (GATHER komutları bu tabloyu atlasın)
+EXEC DBMS_STATS.LOCK_TABLE_STATS('HR', 'SALES_DATA');
+
+-- Kilidi aç
+EXEC DBMS_STATS.UNLOCK_TABLE_STATS('HR', 'SALES_DATA');
+```
+
+---
+
+## 5. İstatistik Export / Import
+
+Bir tablonun üretim ortamındaki (Production) çalışma planını test ortamına taşımak isterseniz, sadece veriyi değil istatistikleri de kopyalamanız gerekir.
+
+```sql
+-- 1. İstatistik tablosu oluştur
+EXEC DBMS_STATS.CREATE_STAT_TABLE('SCOTT', 'MY_STATS_EXPORT');
+
+-- 2. Tablo istatistiklerini bu tabloya aktar
+EXEC DBMS_STATS.EXPORT_TABLE_STATS('SCOTT', 'EMPLOYEES', stattab => 'MY_STATS_EXPORT');
+
+-- 3. (Test ortamında) İstatistikleri geri yükle
+EXEC DBMS_STATS.IMPORT_TABLE_STATS('SCOTT', 'EMPLOYEES', stattab => 'MY_STATS_EXPORT');
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **AUTO_SAMPLE_SIZE:** 11g ve sonrasında bu parametre son derece hızlıdır, manuel yüzde vermekten kaçının.
+-   **Degree:** Büyük tablolarda mutlaka paralellik (`DEGREE`) kullanın.
+-   **Bakım Penceresi:** Oracle'ın otomatik istatistik toplama job'ını (`ORA$AT_OS_OPT_SY_...`) takip edin. Büyük yükleme (Batch) işlemlerinden sonra bu job'ı beklemek yerine manuel `GATHER` yapın.
+
+İstatistikler, veritabanı performansının yakıtıdır. Güncel ve doğru istatistiklerle, veritabanınız her zaman en kısa yolu bulacaktır.

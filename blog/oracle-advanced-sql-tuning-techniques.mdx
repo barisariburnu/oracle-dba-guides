@@ -1,0 +1,84 @@
+---
+title: "Oracle SQL Tuning: Optimizer Hintleri, Trace (10046) ve Plan Analizi"
+description: "Oracle SQL tuning süreçlerinde kullanılan temel Optimizer hintleri, detaylı trace alma yöntemleri (Event 10046) ve oradebug ile süreç analizi."
+date: "2026-01-16"
+category: "Geliştirme"
+tags: ["Oracle", "SQL Tuning", "Optimizer Hints", "Trace 10046", "Performance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Tuning: Optimizer Hintleri ve İzleme
+
+Veritabanı performansı denince akla gelen ilk konu SQL Tuning'dir. Optimizer (Sorgu Yöneticisi) her ne kadar akıllı olsa da, bazen gerçek hayattaki veri dağılımını tam anlayamaz ve yanlış kararlar verebilir. Bu durumlarda DBA'in müdahale etmesi ve Optimizer'a "yol göstermesi" gerekir.
+
+
+<!--truncate-->
+Bu makalede, SQL iyileştirme süreçlerinde kullanılan ileri seviye teknikleri inceleyeceğiz.
+
+## 1. Optimizer Hintleri ile Müdahale
+
+Hintler, SQL cümlesi içine eklenen özel komutlardır. Optimizer bu komutları görerek planını değiştirir.
+
+-   **INDEX Hint:** Belirli bir indeksin kullanılmasını zorunla kılar.
+    `SELECT /*+ INDEX(tablo_adi indeks_adi) */ * FROM tablo_adi;`
+-   **LEADING Hint:** Sorgudaki tabloların hangi sırayla birleştirileceğini (Join Order) belirler.
+-   **PARALLEL Hint:** Sorgunun birden fazla işlemci çekirdeği kullanarak paralel çalışmasını sağlar.
+    `SELECT /*+ PARALLEL(t, 4) */ * FROM tablo t;`
+
+---
+
+## 2. Event 10046 ile Detaylı Trace Alma
+
+Bir sorgunun neden yavaş olduğunu anlamanın en kesin yolu, o sorgunun "röntgenini" çekmektir. **Event 10046**, Oracle'daki en meşhur izleme yöntemidir.
+
+### Oturum Seviyesinde Trace Başlatma
+```sql
+-- En detaylı seviye (Level 12: Wait events ve Bind değişkenleri dahil)
+ALTER SESSION SET EVENTS '10046 trace name context forever, level 12';
+
+-- Sorgunuzu çalıştırın
+SELECT * FROM buyuk_tablo WHERE id = 123;
+
+-- Trace'i durdurun
+ALTER SESSION SET EVENTS '10046 trace name context off';
+```
+
+Oluşan `.trc` dosyasını `tkprof` aracı ile okunabilir bir rapor haline getirebilirsiniz.
+
+---
+
+## 3. ORADEBUG ile Süreç İzleme
+
+Eğer bir oturum kilitlendiyse veya çok yavaşsa ve siz o oturumu yönlendiremiyorsanız (örn: uygulama oturumu), `ORADEBUG` ile dışarıdan müdahale edebilirsiniz.
+
+```bash
+# 1. Oturumun OS PID (Process ID) değerini bulun
+# 2. SQLPlus üzerinden bağlanın
+sqlplus / as sysdba
+SQL> ORADEBUG SETOSPID 16187708; -- PID'yi hedefleyin
+SQL> ORADEBUG UNLIMIT;
+SQL> ORADEBUG EVENT 10046 TRACE NAME CONTEXT FOREVER, LEVEL 12;
+
+-- Bir süre bekledikten sonra trace'i kapatın
+SQL> ORADEBUG EVENT 10046 TRACE NAME CONTEXT OFF;
+SQL> ORADEBUG TRACEFILE_NAME; -- Dosya yolunu bulun
+```
+
+---
+
+## 4. Optimizer Gizli Parametreleri
+
+Bazen global bir sorunu çözmek için Optimizer'ın çalışma mantığını etkileyen alt çizgi parametreleri kullanılır:
+
+```sql
+-- Örnek: Join seçiciliği ile ilgili bir düzeltme
+ALTER SESSION SET "_optimizer_join_sel_sanity_check" = TRUE;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Hint Kullanımı:** Hintler son çare olmalıdır. Önce istatistiklerin güncelliğini ve indeks yapısını kontrol edin.
+-   **Trace Analizi:** Trace dosyalarını analiz ederken en çok zaman harcayan (Elapsed Time) ve en çok blok okuyan (Logical Reads) adımın üzerine odaklanın.
+-   **Test:** Yaptığınız her plan değişikliğini mutlaka bir test ortamında, gerçek veri yüküyle doğrulayın.
+
+SQL Tuning, bir sanattır. Doğru araçları kullanarak bu sanatı veritabanınızın performansını zirveye taşımak için kullanabilirsiniz.

@@ -1,0 +1,71 @@
+---
+title: "Oracle GoldenGate İzleme ve Sorun Giderme (Troubleshooting)"
+description: "Oracle GoldenGate (OGG) mimarisinde Extract, Pump ve Replicat süreçlerini izleme, Lag analizi, 'Checkpoint' yönetimi ve yaygın hataların çözümü."
+date: "2026-01-16"
+category: "GoldenGate"
+tags: ["Oracle GoldenGate", "OGG Monitoring", "Replication", "Data Streaming", "DBA Troubleshooting", "Checkpoint"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle GoldenGate İzleme ve Sorun Giderme
+
+Oracle **GoldenGate (OGG)**, veritabanları arasında gerçek zamanlı (Real-time) veri replikasyonu sağlayan çok güçlü bir araçtır. Ancak bu gücün yanında, karmaşık bir yapısı vardır. Bir DBA'nın en büyük kabuslarından biri, replikasyonun durması veya "Lag" (Gecikme) süresinin kontrol edilemez şekilde büyümesidir. Bu makalede, GoldenGate süreçlerini `GGSCI` arayüzü üzerinden nasıl izleyeceğinizi ve tipik sorunlara nasıl müdahale edeceğinizi öğreneceğiz.
+
+
+<!--truncate-->
+## 1. GoldenGate Status Kontrolü (GGSCI)
+
+GoldenGate yönetim arayüzüne girdikten sonra (`./ggsci`), sistemin genel durumunu şu komutla görebiliriz:
+
+```bash
+GGSCI> info all
+```
+Bu komut; **Extract** (Veri Yakalama), **Pump** (Veri Gönderimi) ve **Replicat** (Veri Yazma) süreçlerinin `RUNNING`, `STARTUP`, `STOPPED` veya `ABENDED` (Hata alıp durmuş) durumlarını listeler.
+
+---
+
+## 2. Detaylı Süreç ve Lag İzleme
+
+Bir sürecin neden yavaş olduğunu veya nerede kaldığını anlamak için:
+
+```bash
+-- Belirli bir process hakkında detaylı bilgi
+GGSCI> info EXT_1, showch
+
+-- Lag (Gecikme) durumuna bakma
+GGSCI> lag REPL_1
+```
+- **Checkpoint Lag:** Replicat'ın kaynaktaki veriyi ne kadar geriden takip ettiğini gösterir.
+- **Time Since Last Checkpoint:** Sürecin en son ne zaman hedef veritabanına veri yazdığını belirtir.
+
+---
+
+## 3. Hata Analizi (Discard ve Report Dosyaları)
+
+Eğer bir Replicat süreci `ABENDED` olduysa, bunun en yaygın sebebi hedef tabloda verinin bulunamaması veya kısıtlamalara (Constraint) takılmasıdır.
+
+1.  **Report Dosyası:** Sürecin neden durduğunu anlamak için ana rapordur.
+    `GGSCI> view report REPL_1`
+2.  **Discard Dosyası:** Hatalı satırların (SQL hataları vb.) döküldüğü dosyadır.
+    `GGSCI> view discard REPL_1.dsc`
+
+---
+
+## 4. Yaygın Sorunlar ve Çözümleri
+
+### A. Replicat Lag Artışı
+Hafıza yetersizliği veya hedef veritabanındaki I/O dar boğazları lag'a neden olabilir. Çözüm olarak `BATCHSQL` veya paralel replikasyon (`INTEGRATED REPLICAT`) kullanılabilir.
+
+### B. Extract'in Arşiv Log Bulamaması
+Eğer veritabanı logları çok hızlı siliniyorsa, Extract henüz okumadan silinen loglara ulaşamaz. Bu durumda `TRANLOGOPTIONS` ile logların RMAN yedeğinden okunması sağlanabilir.
+
+### C. TCP/IP Hataları (Collector)
+Pump süreci hedef tarafa veri gönderemiyorsa, hedefteki `Manager` portunun (varsayılan 7809) açık ve erişilebilir olduğundan emin olun.
+
+## Özet ve En İyi Uygulamalar
+
+-   **Manager Daima Açık:** GoldenGate ortamlarında `Manager` süreci durursa hiçbir şey çalışmaz. Otomatik başlatma (AUTORESTART) parametrelerini mutlaka kullanın.
+-   **Heartbeat Table:** Replikasyon gecikmesini en doğru şekilde ölçmek için kendi `Heartbeat` tablonuzu (her dakika güncellenen bir tablo) kurun.
+-   **Versiyon Uyumluluğu:** Kaynak ve hedef taraftaki GoldenGate versiyonlarının uyumlu olduğundan emin olun (Trail file formatları).
+
+GoldenGate, titiz bir takip ve doğru yapılandırma ile veritabanları arasında kesintisiz bir veri köprüsü kurmanızı sağlar.

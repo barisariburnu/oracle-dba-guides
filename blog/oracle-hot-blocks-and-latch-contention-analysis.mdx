@@ -1,0 +1,99 @@
+---
+title: "Oracle Hot Blocks ve Latch Contention Analizi"
+description: "Oracle veritabanında çok erişilen blokları (hot blocks) tespit etme, buffer busy waits sorunları, latch tespiti ve performans optimizasyonu rehberi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Hot Blocks", "Buffer Busy Waits", "Latch Contention", "V$SEGMENT_STATISTICS", "Performance Tuning", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Hot Blocks ve Latch Contention Analizi
+
+Oracle veritabanında "Hot Blocks" (Sıcak Bloklar), çok sayıda kullanıcı tarafından aynı anda erişilmeye çalışılan veri bloklarını ifade eder. Bu durum, bellekte (Buffer Cache) kilitlenmelere (`buffer busy waits`) ve latch (hafif siklet kilit) çekişmelerine neden olur. Sistemde yüksek CPU kullanımı ve uygulama yavaşlığı ile kendini gösteren bu sorunları nasıl tespit edeceğinizi ve nasıl çözeceğinizi bu makalede inceleyeceğiz.
+
+
+<!--truncate-->
+## Hot Blocks Tespiti
+
+Bir blok, saniyede binlerce kez okunuyor veya güncelleniyorsa "hot" hale gelir. En çok okunan veya yazılan nesneleri (segment) bulmak için `V$SEGMENT_STATISTICS` görünümü en iyi dostumuzdur.
+
+### 1. En Çok Logical/Physical Okuma Yapan Nesneler
+```sql
+SELECT * FROM (
+    SELECT owner, 
+           object_name, 
+           object_type, 
+           statistic_name, 
+           value
+    FROM v$segment_statistics
+    WHERE statistic_name IN ('logical reads', 'physical reads', 'buffer busy waits')
+    ORDER BY value DESC
+)
+WHERE ROWNUM <= 15;
+```
+
+### 2. Buffer Busy Waits Nedenleri
+Eğer listede bir tablo veya index için `buffer busy waits` değeri yüksekse, bu o bloğun "hot" olduğunu kanıtlar. Bu durum genellikle şunlardan kaynaklanır:
+- **Index Leaf Block:** Sürekli artan bir ID (Sequence) üzerinden insert yapılıyorsa, en sondaki index bloğu hot block olur.
+- **Small Tables:** Küçük ama çok sık kullanılan parametre tabloları tek bir blokta toplanmış olabilir.
+
+---
+
+## Latch Contention (Kilit Çekişmesi) Nedir?
+
+Latch'ler, SGA içindeki paylaşılan bellek yapılarını koruyan (Shared Pool, Library Cache vb.) düşük seviyeli kilitlerdir. Eğer sistemde CPU yükü çok yüksekse ve `latch free` bekleme olayı görünüyorsa latch contention vardır.
+
+### Kritik Latch Türleri:
+- **Cache Buffers Chains:** Buffer Cache içindeki blokları ararken kullanılır. Bir hash chain'de çok fazla blok varsa veya bir blok çok popülerse bu latch artar.
+- **Library Cache:** SQL kodlarının ve execution planların tutulduğu alan. Bind variable kullanılmazsa bu latch tavan yapar.
+
+### Latch Beklemelerini İzleme
+```sql
+SELECT name, gets, misses, sleeps, immediate_gets
+FROM v$latch
+WHERE misses > 0
+ORDER BY misses DESC;
+```
+
+---
+
+## Hot Blocks Nasıl Çözülür?
+
+Sistemdeki sıcak blokları soğutmak için uygulanabilecek bazı stratejiler:
+
+### 1. Hash Partitioning
+Sıcak bir tablonun veya indexin verilerini fiziksel olarak farklı bölümlere dağıtmak, I/O yükünü böler.
+```sql
+-- Indexi hash partition olarak recreate etme örneği
+CREATE INDEX idx_hot_col ON large_table(id) GLOBAL PARTITION BY HASH(id) PARTITIONS 16;
+```
+
+### 2. PCTFREE Artırımı
+Bir blok içine sığan satır sayısını azaltarak ("soyreltme"), aynı bloğa erişmek isteyen kullanıcı sayısını azaltabilirsiniz.
+```sql
+ALTER TABLE hot_table PCTFREE 40;
+ALTER TABLE hot_table MOVE; -- Veriyi yeni PCTFREE ile yeniden organize et
+```
+
+### 3. ASSM (Automatic Segment Space Management)
+Eski yöntem manuel freelist yönetiminden kaçının. `SEGMENT SPACE MANAGEMENT AUTO` kullanımı, blok seviyesindeki kilitleri azaltır.
+
+### 4. Reverse Key Index
+Eğer sequence bazlı bir kolonda index contention varsa, indexi reverse key yaparak değerlerin dağılımını sağlayabilirsiniz.
+```sql
+CREATE INDEX idx_rev ON logs(id) REVERSE;
+```
+<Callout type="warning">
+**Dikkat:** Reverse key index, range scan (aralık sorgulama) performansını düşürür. Sadece exact match (`id = 123`) sorgularında kullanılmalıdır.
+</Callout>
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **İstatistiki Analiz:** Her zaman `V$SEGMENT_STATISTICS` ile gerçek "sıcak" nesneyi bulun.
+-   **Bind Variables:** Latch sorunlarının %90'ı bind variable kullanılmayan SQL'lerden kaynaklanır. Literal SQL kullanımını engelleyin.
+-   **Partitioning:** Çok büyük tablolarda hash partitioning, blok seviyesindeki çekişmeyi önlemenin en profesyonel yoludur.
+-   **Block Size:** Çok nadir durumlarda, hot block'ları azaltmak için daha küçük blok boyutları (örneğin 2K) olan ayrı bir tablespace kullanılabilir.
+
+Bu yöntemlerle veritabanınızdaki kilitlenme sürelerini azaltabilir ve CPU verimliliğini %30-50'ye kadar artırabilirsiniz.

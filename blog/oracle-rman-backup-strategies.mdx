@@ -1,0 +1,90 @@
+---
+title: "Oracle RMAN Temel Kavramlar ve Backup Stratejileri"
+description: "Oracle Recovery Manager (RMAN) ile veritabanı yedekleme stratejileri, Compressed Backup, Incremental Backup ve RMAN konfigürasyon parametreleri rehberi."
+date: 2026-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "backup", "incremental backup", "database recovery", "dba", "sql"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN Temel Kavramlar ve Backup Stratejileri
+
+Oracle veritabanlarında veri güvenliğinin en önemli bileşeni **RMAN (Recovery Manager)**'dır. RMAN, blok seviyesinde yedekleme yaparak sadece dolu olan blokları yedekler, bozuk blokları tespit eder ve yedekleme süresini dramatik şekilde azaltan teknolojiler sunar.
+
+
+<!--truncate-->
+## Temel RMAN Konfigürasyonu
+
+Yedekleme işlemine başlamadan önce standart parametrelerin (`CONFIGURE` komutları) ayarlanması gerekir:
+
+```rman
+-- 7 günlük yedek saklama süresi
+CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 7 DAYS;
+
+-- Controlfile yedeğinin her zaman otomatik alınması
+CONFIGURE CONTROLFILE AUTOBACKUP ON;
+
+-- Paralel çalışacak kanal sayısı
+CONFIGURE DEVICE TYPE DISK PARALLELISM 4 BACKUP TYPE TO COMPRESSED BACKUPSET;
+
+-- Backup optimizasyonu (yedeği alınan değişmemiş dosyaları tekrar almaz)
+CONFIGURE BACKUP OPTIMIZATION ON;
+```
+
+## Backup Stratejileri
+
+### 1. Full Backup (Compressed)
+
+Büyük veritabanlarında disk alanından tasarruf etmek için sıkıştırılmış (compressed) backup kullanımı standarttır.
+
+```rman
+RUN {
+  ALLOCATE CHANNEL c1 DEVICE TYPE DISK;
+  BACKUP AS COMPRESSED BACKUPSET DATABASE 
+  PLUS ARCHIVELOG DELETE INPUT;
+  RELEASE CHANNEL c1;
+}
+```
+
+### 2. Incremental Backup (Seviyeli Yedekleme)
+
+Incremental backup, sadece bir önceki yedekten sonra değişen blokları yedekler.
+
+- **Level 0:** Temel yedektir (Full backup'a benzer ama incremental stratejisinin parçasıdır).
+- **Level 1:** Sadece Level 0'dan sonra değişenleri alır.
+
+```rman
+-- Pazar günü Level 0
+BACKUP INCREMENTAL LEVEL 0 DATABASE;
+
+-- Diğer günler Level 1
+BACKUP INCREMENTAL LEVEL 1 DATABASE;
+```
+
+<Callout type="info" title="Hızlı Yedekleme: Block Change Tracking">
+Incremental yedekleme süresini kısaltmak için `Block Change Tracking` özelliğini aktif etmelisiniz. Bu sayede Oracle tüm dosyayı taramak yerine sadece değişen blokların listesini bir dosyadan okur.
+`ALTER DATABASE ENABLE BLOCK CHANGE TRACKING USING FILE '/u01/app/oracle/bct.f';`
+</Callout>
+
+## RMAN Monitoring (Yedekleme Durumu)
+
+Yedekleme işleminin ne kadar süreceğini ve yüzde kaç tamamlandığını izlemek için:
+
+```sql
+SELECT sid, serial#, context, sofar, totalwork,
+       ROUND(sofar/totalwork*100,2) AS pct_done
+FROM v$session_longops
+WHERE opname LIKE 'RMAN%'
+  AND totalwork > 0
+  AND sofar < totalwork;
+```
+
+## En İyi Uygulamalar (Best Practices)
+
+1. **Test Edin:** Yedek almak yetmez; periyodik olarak `RESTORE VALIDATE` komutu ile yedeklerinizin okunabilir olduğunu doğrulayın.
+2. **Offsite Backup:** Yedeklerinizi veritabanı ile aynı storage üzerinde tutmayın. Farklı bir sunucuya veya Teyp (Tape) ünitesine aktarın.
+3. **Log Takibi:** RMAN loglarını her gün kontrol edin. `ORA-` hatalarını kaçırmamak için logları e-mail atan bir script hazırlayın.
+
+## Sonuç
+
+RMAN, modern bir veritabanının sigortasıdır. Doğru bir incremental stratejisi ve sıkıştırma kullanımı ile hem zaman hem de depolama alanından büyük tasarruf sağlayabilirsiniz.

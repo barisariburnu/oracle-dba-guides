@@ -1,0 +1,88 @@
+---
+title: "Oracle RAC Network Yapılandırması: IP Adresi Değiştirme Prosedürü"
+description: "Oracle RAC ortamında Public, Virtual (VIP) ve SCAN IP adreslerini güvenli bir şekilde değiştirme adımları, srvctl ve oifcfg kullanımı."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle RAC", "IP Change", "VIP", "SCAN IP", "oifcfg", "Networking", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RAC Network Yapılandırması: IP Adresi Değiştirme Prosedürü
+
+Oracle **Real Application Clusters (RAC)** ortamında IP adresi değiştirmek, standart bir sunucudaki kadar basit değildir. Cluster katmanının (CRS) Public, VIP (Virtual IP) ve SCAN IP bilgilerini senkronize bir şekilde güncellemesi gerekir. Yanlış bir adım cluster'ın başlamamasına veya servislerin erişilemez hale gelmesine yol açabilir. Bu makalede, RAC ortamında IP değişimini güvenli bir şekilde nasıl gerçekleştireceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Hazırlık ve Dosyaların Güncellenmesi
+
+Herhangi bir komut çalıştırmadan önce, işletim sistemi seviyesinde gerekli hazırlıkları yapmalısınız.
+
+-   **Backup:** OCR (`ocrconfig -manualbackup`) ve OLR yedeklerini alın.
+-   **/etc/hosts:** Tüm node'lardaki `/etc/hosts` dosyasını yeni IP adreslerine göre güncelleyin.
+-   **DNS:** Eğer SCAN IP DNS üzerindeyse, network ekibiyle koordineli bir şekilde DNS kayıtlarını güncelleyin.
+
+---
+
+## 2. Public IP ve Network Interface Değişimi
+
+Network arayüzlerini ve Public IP aralıklarını yönetmek için `oifcfg` (Oracle Interface Configuration Tool) kullanılır.
+
+```bash
+-- Mevcut yapıyı gör
+oifcfg getif
+
+-- Mevcut arayüzü sil ve yenisini ekle
+oifcfg delif -global bond0/192.168.1.101
+oifcfg setif -global bond0/192.168.1.101:public
+oifcfg setif -global bond1/192.168.1.101:cluster_interconnect
+```
+
+---
+
+## 3. VIP (Virtual IP) Adresini Güncelleme
+
+VIP adresleri her node için ayrı ayrı güncellenmelidir. İşlem öncesinde VIP ve bağlı olan listener durdurulmalıdır.
+
+```bash
+-- 1. Servisleri durdur
+srvctl stop vip -n <NODE_NAME> -f
+
+-- 2. VIP konfigürasyonunu güncelle
+srvctl modify nodeapps -n <NODE_NAME> -A <NEW_VIP_IP>/192.168.1.101/bond0
+
+-- 3. VIP'yi tekrar başlat
+srvctl start vip -n <NODE_NAME>
+```
+
+---
+
+## 4. SCAN IP Adresini Güncelleme
+
+SCAN (Single Client Access Name), istemcilerin veritabanına bağlanmak için kullandığı ortak isimdir.
+
+```bash
+-- 1. SCAN listener ve SCAN durdurulur
+srvctl stop scan_listener
+srvctl stop scan
+
+-- 2. SCAN VIP güncellenir (DNS kullanılıyorsa Refresh yapılır)
+srvctl modify scan -n <SCAN_NAME>
+
+-- 3. SCAN başlatılır
+srvctl start scan
+srvctl start scan_listener
+```
+
+---
+
+## 5. Listener ve TNS Dosyaları
+
+IP değişimi sonrası `listener.ora` ve `tnsnames.ora` dosyalarındaki IP adreslerini kontrol edin. RAC ortamında listener genellikle SCAN üzerinden yönetildiği için manuel müdahale minimumdur, ancak yerel listener'ların (`LISTENER_<NODE>`) durumunu kontrol etmekte fayda vardır.
+
+## Özet ve Kritik Notlar
+
+-   **IP Adresi Çakışması:** Yeni IP'lerin ağda başka bir cihaz tarafından kullanılmadığından emin olun.
+-   **Subnet Mask:** Eğer IP ile birlikte Subnet Mask veya Default Gateway değişiyorsa, `oifcfg` ve `srvctl modify nodeapps` komutlarında bu bilgileri de güncellemeyi unutmayın.
+-   **CRS Restart:** Tüm işlemler bittikten sonra tam bir cluster restart (`crsctl stop/start crs`) yaparak ayarların kalıcılığını test edin.
+
+IP değişimi karmaşık görünse de, planlı ve adım adım ilerlendiğinde cluster sağlığını bozmadan tamamlanabilir.

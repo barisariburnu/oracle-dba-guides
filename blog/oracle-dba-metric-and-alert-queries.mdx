@@ -1,0 +1,89 @@
+---
+title: "Oracle DBA Metrik ve Alarm Sorguları: Sistem Sağlığını İzleme"
+description: "Oracle veritabanında High Water Mark (HWM) tespiti, sistem metrikleri (gv$sysstat), bağlantı yapan makinaların analizi ve kritik alarm sorguları."
+date: "2026-01-16"
+category: "Monitoring"
+tags: ["Oracle Metrics", "HWM", "System Stats", "DBA Monitoring", "Alert Queries", "Database Health"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle DBA Metrik ve Alarm Sorguları: Sistem Sağlığı
+
+Bir veritabanı yöneticisi (DBA) için sistemin o anki "kalp atışlarını" izlemek, olası bir kesintiyi veya yavaşlamayı önceden görebilmek adına hayatidir. Oracle, binlerce sistem metriğini hafızada (`V$`) tutar. Ayrıca tabloların büyüme sınırları olan "High Water Mark" (HWM) gibi yapısal metrikler de depolama yönetimi için kritiktir. Bu makalede, günlük izleme rutinlerinizde kullanabileceğiniz temel metrik ve alarm sorgularını inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Sistem Metrikleri ve İstatistikler (GV$SYSSTAT)
+
+Sistemin açıldığından beri (Instance startup) yaptığı toplam fiziksel okuma, commit sayısı, rollback sayısı gibi verileri görmek için:
+
+```sql
+SELECT inst_id, 
+       name, 
+       value 
+FROM gv$sysstat 
+WHERE name IN ('physical reads', 'user commits', 'user rollbacks', 'execute count', 'parse count (total)')
+ORDER BY inst_id, name;
+```
+
+---
+
+## 2. High Water Mark (HWM) Analizi
+
+Bir tablodan veri silinse dahi, tablonun kapladığı alan (High Water Mark) düşmez. Bu durum, veri az olsa bile `Full Table Scan` işlemlerinin yavaşlamasına neden olur. HWM seviyesini kontrol ederek tabloyu "shrink" etmeye veya "rebuild" etmeye karar verebilirsiniz.
+
+```sql
+SELECT owner, 
+       table_name, 
+       blocks, 
+       empty_blocks, 
+       avg_space, 
+       num_rows
+FROM dba_tables
+WHERE owner NOT IN ('SYS', 'SYSTEM', 'SYSMAN')
+  AND blocks > 1000 -- Sadece büyük tabloları gör
+ORDER BY blocks DESC;
+```
+
+---
+
+## 3. Veritabanına Bağlanan Makinelerin Analizi
+
+Sisteme hangi uygulama sunucusundan veya bilgisayardan ne kadar yük geldiğini anlamak için oturumları (session) makine bazlı gruplandırabiliriz:
+
+```sql
+SELECT machine, 
+       COUNT(*) AS session_count, 
+       username, 
+       status
+FROM v$session
+WHERE type = 'USER'
+GROUP BY machine, username, status
+ORDER BY session_count DESC;
+```
+
+---
+
+## 4. Kritik Bekleme ve Hata Alarmları
+
+Aşağıdaki sorgu ile sistemde o an bekleyen ve potansiyel alarm oluşturabilecek durumları hızlıca check edebilirsiniz:
+
+```sql
+-- Bekleme sınıflarına göre dağılım
+SELECT wait_class, 
+       SUM(time_waited) AS total_wait_time
+FROM v$system_wait_class
+WHERE wait_class != 'Idle'
+GROUP BY wait_class
+ORDER BY total_wait_time DESC;
+```
+
+---
+
+## DBA İçin Pratik Notlar
+
+-   **HWM ve Performans:** Eğer bir tabloda `num_rows` çok az fakat `blocks` sayısı çok yüksekse, o tablo "HWM fragmentation" yaşıyordur. `ALTER TABLE table_name SHRINK SPACE;` komutu ile (eğer row movement açıksa) bu alanı geri kazanabilirsiniz.
+-   **gv$ View'ler:** RAC (Real Application Clusters) kullanıyorsanız, `v$` yerine her zaman `gv$` view'lerini kullanarak tüm instance'ların verilerini tek sorguda toplayın.
+-   **İstatistik Güncelliği:** HWM ve `dba_tables` verilerinin doğru olması için tablo istatistiklerinin (`DBMS_STATS`) güncel olması gerektiğini unutmayın.
+
+Bu sorgular, veritabanı performansını ve kapasitesini proaktif olarak yönetmenizi sağlayacak temel yapı taşlarıdır.

@@ -1,0 +1,377 @@
+---
+title: "Oracle Kapsamlı Veritabanı HTML Raporu Oluşturma"
+description: "Oracle veritabanının tüm yönlerini kapsayan detaylı HTML health check raporu oluşturma scripti ve kullanım rehberi."
+date: 2026-01-16
+category: "Oracle Monitoring"
+tags: ["oracle", "health check", "html report", "monitoring", "comprehensive", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Kapsamlı Veritabanı HTML Raporu Oluşturma
+
+Oracle DBA'ların günlük rutininde en zaman alıcı görevlerden biri, veritabanının farklı yönlerini kontrol etmektir. Bu makalede, tek bir SQL scripti ile tüm veritabanı sağlık durumunu HTML formatında raporlayan kapsamlı bir çözüm sunacağım.
+
+
+<!--truncate-->
+## HTML Report Özellikleri
+
+Bu script şu bölümleri içeren kapsamlı bir rapor oluşturur:
+
+1. **Database Startup Zamanı** - Instance ve database bilgileri
+2. **Tablespace Durumu** - Doluluk oranları ve boş alan
+3. **Database Size** - Toplam veritabanı boyutu
+4. **ASM Disk Grupları** - ASM kullanım durumu
+5. **Backup Durumu** - Son 20 günlük RMAN backup'lar
+6. **Hatalı Joblar** - Son 2 günün başarısız job'ları
+7. **Alert Log Hataları** - Son 1 günlük ORA- hataları
+
+<Callout type="info" title="Önemli Not">
+Bu script, HTML formatında görsel bir rapor oluşturur. Rapor otomatik olarak `/home/oracle/scripts/rapor.html` dosyasına kaydedilir.
+</Callout>
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- SYSDBA yetkisi
+- Çıktı dizini için write yetkisi
+- SQL*Plus HTML markup desteği
+
+## Script İçeriği
+
+```sql
+SET MARKUP HTML ON SPOOL ON PREFORMAT OFF ENTMAP ON
+BODY "TEXT='#000000' BGCOLOR='#FFFFFF'"
+TABLE "BORDER='2' BGCOLOR='#E0E0E0' WIDTH='90%'"
+
+set linesize 150
+set pagesize 150
+set heading on
+spool /home/oracle/scripts/rapor.html
+
+-- 1. DATABASE STARTUP ZAMANI
+SELECT '=== DATABASE STARTUP TIME ===' AS section FROM dual;
+SELECT i.host_name,
+       i.instance_name,
+       d.name,
+       d.open_mode,
+       i.startup_time
+  FROM v$instance i, v$database d;
+
+-- 2. TABLESPACE DURUMU
+SELECT '=== TABLESPACE USAGE ===' AS section FROM dual;
+SELECT a.tablespace_name,
+       ROUND(a.bytes_alloc / 1024 / 1024) allocated_MB,
+       ROUND(NVL(b.bytes_free, 0) / 1024 / 1024) free_MB,
+       ROUND((a.bytes_alloc - NVL(b.bytes_free, 0)) / 1024 / 1024) used_MB,
+       ROUND((NVL(b.bytes_free, 0) / a.bytes_alloc) * 100) Pct_Free,
+       100 - ROUND((NVL(b.bytes_free, 0) / a.bytes_alloc) * 100) Pct_used,
+       ROUND(maxbytes / 1048576) MAX_MB
+  FROM (SELECT f.tablespace_name,
+               SUM(f.bytes) bytes_alloc,
+               SUM(DECODE(f.autoextensible, 'YES', f.maxbytes, 'NO', f.bytes)) maxbytes
+          FROM dba_data_files f
+         GROUP BY tablespace_name) a,
+       (SELECT f.tablespace_name, SUM(f.bytes) bytes_free
+          FROM dba_free_space f
+         GROUP BY tablespace_name) b
+ WHERE a.tablespace_name = b.tablespace_name(+)
+UNION ALL
+  SELECT h.tablespace_name,
+         ROUND(SUM(h.bytes_free + h.bytes_used) / 1048576) allocated_MB,
+         ROUND(SUM((h.bytes_free + h.bytes_used) - NVL(p.bytes_used, 0)) / 1048576) free_MB,
+         ROUND(SUM(NVL(p.bytes_used, 0)) / 1048576) used_MB,
+         ROUND((SUM((h.bytes_free + h.bytes_used) - NVL(p.bytes_used, 0)) / SUM(h.bytes_used + h.bytes_free)) * 100) Pct_Free,
+         100 - ROUND((SUM((h.bytes_free + h.bytes_used) - NVL(p.bytes_used, 0)) / SUM(h.bytes_used + h.bytes_free)) * 100) pct_used,
+         ROUND(SUM(f.maxbytes) / 1048576) MAX_MB
+    FROM sys.v_$TEMP_SPACE_HEADER h,
+         sys.v_$Temp_extent_pool p,
+         dba_temp_files f
+   WHERE p.file_id(+) = h.file_id
+     AND p.tablespace_name(+) = h.tablespace_name
+     AND f.file_id = h.file_id
+     AND f.tablespace_name = h.tablespace_name
+   GROUP BY h.tablespace_name
+ORDER BY 3 ASC;
+
+-- 3. DATABASE SIZE
+SELECT '=== DATABASE SIZE ===' AS section FROM dual;
+SELECT SUM(bytes / (1024*1024)) "DB Size in MB"
+  FROM dba_segments;
+
+-- 4. ASM DISK DURUMU
+SELECT '=== ASM DISK GROUPS ===' AS section FROM dual;
+SELECT group_number,
+       name,
+       type,
+       total_mb,
+       free_mb
+  FROM v$asm_diskgroup;
+
+-- 5. BACKUP DURUMU
+SELECT '=== BACKUP SUMMARY (Last 20 Days) ===' AS section FROM dual;
+SELECT start_time,
+       input_type,
+       status,
+       ROUND(elapsed_seconds / 3600, 1) time_hr
+  FROM v$rman_backup_job_details
+ WHERE START_TIME > SYSDATE - 20
+ORDER BY start_time DESC;
+
+-- 6. HATALI BİTEN JOBLAR
+SELECT '=== FAILED JOBS (Last 2 Days) ===' AS section FROM dual;
+SELECT owner,
+       job_name,
+       status,
+       LOG_DATE,
+       ERROR#,
+       (EXTRACT(SECOND FROM run_duration) +
+        EXTRACT(MINUTE FROM run_duration) * 60 +
+        EXTRACT(HOUR FROM run_duration) * 3600 +
+        EXTRACT(DAY FROM run_duration) * 3600 * 24) SECONDS,
+       ADDITIONAL_INFO
+  FROM dba_scheduler_job_run_details
+ WHERE LOG_DATE > SYSDATE - 2
+   AND status != 'SUCCEEDED'
+ORDER BY 1 ASC, 4 DESC;
+
+-- 7. ALERT LOG HATALARI
+SELECT '=== ALERT LOG ERRORS (Last 1 Day) ===' AS section FROM dual;
+SELECT SUBSTR(MESSAGE_TEXT, 1, 300) MESSAGE_TEXT,
+       TO_CHAR(ORIGINATING_TIMESTAMP, 'DD-MON-YYYY HH24:MI:SS') Occur_date
+  FROM X$DBGALERTEXT
+ WHERE (MESSAGE_TEXT LIKE '%ORA-%' OR
+        UPPER(MESSAGE_TEXT) LIKE '%ERROR%')
+   AND CAST(ORIGINATING_TIMESTAMP AS DATE) > SYSDATE - 1;
+
+SELECT '=== REPORT COMPLETED ===' AS section FROM dual;
+
+spool off;
+exit;
+```
+
+## Kullanım
+
+```bash
+sqlplus -s / as sysdba @dbcontrol.sql
+```
+
+Rapor otomatik olarak `/home/oracle/scripts/rapor.html` dosyasına kaydedilir.
+
+## Rapor Bölümleri
+
+### 1. Database Startup Zamanı
+
+Instance uptime ve database açık modunu gösterir:
+
+- **HOST_NAME**: Sunucu hostname'i
+- **INSTANCE_NAME**: Instance adı
+- **NAME**: Database adı
+- **OPEN_MODE**: READ WRITE, READ ONLY, MOUNTED
+- **STARTUP_TIME**: Instance başlangıç zamanı
+
+<Callout type="warning" title="Uyarı">
+Eğer startup_time son 24 saat içindeyse ve planned restart yoksa, araştırma yapmalısınız.
+</Callout>
+
+### 2. Tablespace Durumu
+
+Tüm tablespace'lerin doluluk oranlarını gösterir:
+
+- **ALLOCATED_MB**: Toplam ayrılmış alan
+- **FREE_MB**: Boş alan
+- **USED_MB**: Kullanılan alan
+- **PCT_FREE/USED**: Yüzdelik doluluk
+- **MAX_MB**: Autoextend ile ulaşabileceği maksimum boyut
+
+### 3. Database Size
+
+Toplam veritabanı boyutunu MB cinsinden gösterir.
+
+### 4. ASM Disk Grupları
+
+ASM diskgroup'larının kullanım durumunu raporlar:
+
+- **GROUP_NUMBER**: Diskgroup numarası
+- **NAME**: Diskgroup adı (DATA, FRA, vb.)
+- **TYPE**: Redundancy tipi (EXTERNAL, NORMAL, HIGH)
+- **TOTAL_MB**: Toplam kapasite
+- **FREE_MB**: Boş alan
+
+<Callout type="info" title="İpucu">
+ASM diskgroup doluluk oranı %80'i geçerse acil disk ekleme gerekir. Bu rapor ile durumu hızlıca görebilirsiniz.
+</Callout>
+
+### 5. Backup Durumu
+
+Son 20 günlük tüm RMAN backup job'larını listeler:
+
+- **START_TIME**: Backup başlangıç zamanı
+- **INPUT_TYPE**: Backup tipi (DB FULL, DB INCR, ARCHIVELOG)
+- **STATUS**: Durum (COMPLETED, FAILED, RUNNING)
+- **TIME_HR**: Backup süresi (saat)
+
+### 6. Hatalı Joblar
+
+Son 2 gün içinde başarısız olan Oracle scheduler job'larını gösterir:
+
+- **OWNER**: Job sahibi
+- **JOB_NAME**: Job adı
+- **STATUS**: Durum (FAILED, FAILED OVER)
+- **LOG_DATE**: Log tarihi
+- **ERROR#**: Hata kodu
+- **SECONDS**: Çalışma süresi
+- **ADDITIONAL_INFO**: Ek hata bilgisi
+
+### 7. Alert Log Hataları
+
+Son 1 günün ORA- hatalarını listeler:
+
+- **MESSAGE_TEXT**: Hata mesajı (ilk 300 karakter)
+- **OCCUR_DATE**: Olay tarihi
+
+## Kullanım Senaryoları
+
+### 1. Günlük Morning Check
+
+Her sabah veritabanı durumunu kontrol edin:
+
+```bash
+#!/bin/bash
+# morning_report.sh
+
+DATE=$(date +%Y%m%d)
+REPORT_FILE="/home/oracle/scripts/rapor_${DATE}.html"
+
+# Raporu oluştur
+sqlplus -s / as sysdba @dbcontrol.sql
+
+# Raporu move et
+mv /home/oracle/scripts/rapor.html $REPORT_FILE
+
+# E-mail olarak gönder
+(echo "Subject: Morning DB Report - $(date)"
+ echo "MIME-Version: 1.0"
+ echo "Content-Type: text/html"
+ cat $REPORT_FILE) | sendmail dba@example.com
+```
+
+### 2. Otomatik Monitoring
+
+Cron job ile her saat başı rapor oluşturun:
+
+```bash
+# /etc/crontab
+0 * * * * oracle /home/oracle/scripts/dbcontrol.sh
+```
+
+### 3. Problem Investigation
+
+Sorun yaşandığında hızlıca durum analizi yapın:
+
+```bash
+sqlplus -s / as sysdba @dbcontrol.sql
+# Raporu aç ve incele
+firefox /home/oracle/scripts/rapor.html
+```
+
+## Özelleştirme
+
+### Rapor Lokasyonunu Değiştirme
+
+```sql
+-- Farklı bir dizine kaydetmek için
+spool /u01/app/oracle/admin/db01/reports/daily_report.html
+```
+
+### Rapor Aralığını Ayarlama
+
+```sql
+-- Backup aralığını değiştir (20 gün -> 7 gün)
+WHERE START_TIME > SYSDATE - 7
+
+-- Job aralığını değiştir (2 gün -> 1 gün)
+WHERE LOG_DATE > SYSDATE - 1
+
+-- Alert log aralığını değiştir (1 gün -> 6 saat)
+AND CAST(ORIGINATING_TIMESTAMP AS DATE) > SYSDATE - 0.25
+```
+
+### HTML Stilini Özelleştirme
+
+```sql
+SET MARKUP HTML ON SPOOL ON PREFORMAT OFF ENTMAP ON
+BODY "TEXT='#000000' BGCOLOR='#F5F5DC' LINK='#0000FF'"
+TABLE "BORDER='1' CELLPADDING='4' CELLSPACING='2' BGCOLOR='#E0E0E0' WIDTH='95%'"
+```
+
+## Entegrasyon Örnekleri
+
+### Enterprise Manager Entegrasyonu
+
+Eğer OEM kullanıyorsanız, bu script'i custom report olarak ekleyebilirsiniz:
+
+1. OEM Console → Reports → Create
+2. Report Type: SQL Script Report
+3. SQL Script: Bu script'i yapıştırın
+4. Schedule: Daily 08:00 AM
+
+### Dashboard Entegrasyonu
+
+HTML çıktısını dashboard tool'larına (Grafana, Kibana) entegre edin:
+
+```bash
+# HTML'yi parse et ve JSON'a çevir
+python3 parse_html_report.py /home/oracle/scripts/rapor.html > /tmp/metrics.json
+
+# Metrics'i Grafana'ya gönder
+curl -X POST http://grafana:3000/api/metrics -d @/tmp/metrics.json
+```
+
+## Best Practices
+
+### 1. Rapor Saklama
+
+```bash
+# Son 30 günün raporlarını sakla
+find /home/oracle/scripts/ -name "rapor_*.html" -mtime +30 -delete
+```
+
+### 2. Alert Entegrasyonu
+
+```bash
+# Kritik durum varsa e-mail gönder
+if grep -q "FAILED" /home/oracle/scripts/rapor.html; then
+    mail -s "CRITICAL: Database Issues Detected" dba@example.com < /home/oracle/scripts/rapor.html
+fi
+```
+
+### 3. Performans İyileştirme
+
+- Rapor oluşumu 10-30 saniye sürer
+- Yoğun veritabanlarında aralıkları azaltın (20 gün → 7 gün)
+- HTML formatı yerine plain text kullanabilirsiniz (hızlı ama az okunabilir)
+
+## İlgili Scriptler
+
+- [alert.md](oracle-alert-log-monitoring.mdx) - Alert log monitoring
+- [backup.md](oracle-rman-backup-monitoring.mdx) - Backup monitoring
+- [tablespace.md](oracle-tablespace-monitoring.mdx) - Tablespace monitoring
+- [database.md](oracle-database-health-check.mdx) - Database health check
+
+## Kaynaklar
+
+- Oracle SQL*Plus User's Guide and Reference
+- Oracle Database Administrator's Guide
+- HTML Reporting with SQL*Plus
+
+## Sonraki Adımlar
+
+Bu kapsamlı raporlama scripti ile şunları yapabilirsiniz:
+
+- Otomatik günlük/haftalık raporlama
+- E-mail ile otomatik dağıtım
+- Trend analizi için historik saklama
+- Dashboard entegrasyonu
+- Multi-database toplu raporlama
+
+Bu script ile tek bir sorgu ile veritabanınızın tüm yönlerini hızlıca kontrol edebilir ve görsel bir rapor oluşturabilirsiniz.

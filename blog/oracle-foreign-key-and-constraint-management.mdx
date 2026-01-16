@@ -1,0 +1,101 @@
+---
+title: "Oracle Foreign Key ve Constraint Yönetimi: Disable, Enable ve Indexleme"
+description: "Oracle veritabanında bütünlük kısıtlamalarını (Constraints) yönetme, toplu disable/enable işlemleri ve unindexed foreign key risklerini önleme rehberi."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Constraints", "Foreign Key", "Data Integrity", "DBA Maintenance", "Enable Constraints", "Disable Constraints"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Foreign Key ve Constraint Yönetimi
+
+Veritabanı tasarımında **Constraint (Kısıtlayıcılar)**, verinin kalitesini ve bütünlüğünü (Integrity) koruyan en temel yapılardır. Ancak, büyük veri yükleme (Data Load) operasyonları, veri taşıma veya şema değişiklikleri sırasında bu kısıtları devre dışı bırakmak veya durumlarını toplu olarak değiştirmek gerekebilir. Bu makalede, Oracle'da constraint'lerin nasıl yönetileceğini ve toplu işlem scriptlerini inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Constraint Türleri Kısa Özet
+
+-   **Primary Key (P):** Satırı eşsiz tanımlar.
+-   **Foreign Key (R):** Tablolar arası ilişki kurar (Referential Integrity).
+-   **Check Constraint (C):** Belirli koşulları (örn: yas &gt; 18) kontrol eder.
+-   **Unique (U):** Sütundaki verilerin eşsiz olmasını sağlar.
+
+---
+
+## 2. Toplu Constraint Disable/Enable İşlemi
+
+Bazen milyonlarca satırlık veri yüklerken performans için constraint'leri geçici olarak kapatmak istersiniz.
+
+### Disable Eden Sorguyu Üretme
+```sql
+SELECT 'ALTER TABLE ' || owner || '.' || table_name || 
+       ' DISABLE CONSTRAINT ' || constraint_name || ';' AS disable_sql
+FROM dba_constraints
+WHERE owner = 'MUHASEBE'
+  AND constraint_type = 'R' -- Sadece Foreign Keyleri kapat
+  AND status = 'ENABLED';
+```
+
+### Enable Eden Sorguyu Üretme
+```sql
+SELECT 'ALTER TABLE ' || owner || '.' || table_name || 
+       ' ENABLE NOVALIDATE CONSTRAINT ' || constraint_name || ';' AS enable_sql
+FROM dba_constraints
+WHERE owner = 'MUHASEBE'
+  AND constraint_type = 'R'
+  AND status = 'DISABLED';
+```
+<Callout type="info">
+`ENABLE NOVALIDATE` kullanmak, mevcut hatalı verileri kontrol etmeden kısıtı aktif eder. Bu, büyük tablolarda çok daha hızlıdır. Eğer verinin doğruluğundan eminseniz bu yöntemi seçin.
+</Callout>
+
+---
+
+## 3. Unindexed Foreign Key Kontrolü
+
+Bir önceki yazımızda bahsettiğimiz gibi, indexlenmemiş foreign key'ler kilitlenme (locking) sorunlarına yol açar. Aşağıdaki sorgu ile şema bazlı hızlı bir tarama yapabilirsiniz:
+
+```sql
+SELECT acc.owner, 
+       acc.table_name, 
+       acc.constraint_name, 
+       acc.column_name, 
+       acc.position
+FROM dba_cons_columns acc, dba_constraints ac
+WHERE acc.constraint_name = ac.constraint_name
+  AND acc.owner = ac.owner
+  AND ac.constraint_type = 'R'
+  AND acc.owner = 'SCHEMA_ADI'
+  AND NOT EXISTS (
+      SELECT 1 FROM dba_ind_columns aic
+      WHERE aic.table_owner = acc.owner
+        AND aic.table_name = acc.table_name
+        AND aic.column_name = acc.column_name
+        AND aic.column_position = acc.position
+  );
+```
+
+---
+
+## 4. Constraint Durumlarını İzleme
+
+Sistemdeki tüm passif kısıtları bulmak için:
+
+```sql
+SELECT owner, 
+       table_name, 
+       constraint_name, 
+       constraint_type, 
+       status
+FROM dba_constraints
+WHERE status = 'DISABLED'
+  AND owner NOT IN ('SYS', 'SYSTEM');
+```
+
+## Özet ve En İyi Uygulamalar
+
+1.  **Sıralama Önemlidir:** Bir tabloyu silmeden veya boşaltmadan (Truncate) önce, ona bağlı olan foreign key'leri kapatmanız gerekebilir.
+2.  **Validasyon:** Veri yükleme sonrası `ENABLE VALIDATE` yaparak verilerin bütünlük kurallarına uyup uymadığını mutlaka test edin.
+3.  **Hata Takibi:** Eğer bir constraint'i aktif edemiyorsanız, `EXCEPTIONS INTO` clause'u ile hatalı satırları bir tabloya yazdırıp inceleyebilirsiniz.
+
+Constraint yönetimi, veritabanının "muhafızlarını" yönetmektir. Bu muhafızları ne zaman dinlendireceğinizi ve ne zaman göreve çağıracağınızı bilmek, karmaşık veri operasyonlarını sorunsuz atlatmanızı sağlar.

@@ -1,0 +1,90 @@
+---
+title: "Oracle Index Analizi: İstatistikler ve Rebuild Stratejileri"
+description: "Oracle veritabanında index sağlığını kontrol etme, index istatistiklerini (BLEVEL, Clustering Factor) anlama, index taşıma ve online rebuild teknikleri."
+date: "2026-01-16"
+category: "Index"
+tags: ["Oracle Index", "Index Rebuild", "Statistics", "DBA", "Performance Tuning", "Clustering Factor"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Index Analizi: İstatistikler ve Rebuild Stratejileri
+
+Oracle veritabanında indexler zamanla "bozulabilir". Buradaki bozulma fiziksel bir hata değil, verinin silinmesi ve eklenmesi sonucu index yapısının (B-Tree) dengesizleşmesi (Fragmentation) veya boşlukların oluşmasıdır. Bir DBA olarak, hangi indexin gerçekten rebuild edilmeye ihtiyacı olduğunu bilmek, gereksiz I/O ve sistem yükünden kaçınmak için kritiktir. Bu makalede, index sağlığını nasıl ölçeceğinizi ve nasıl güvenle rebuild yapacağınızı detaylandıracağız.
+
+
+<!--truncate-->
+## 1. Index Sağlık Metrikleri
+
+Bir indexin performansını belirleyen iki temel istatistik vardır:
+
+### A. BLEVEL (B-Tree Level)
+Indexin kök bloğu ile yaprak blokları (Leaf Blocks) arasındaki derinliktir.
+- **0 veya 1:** Çok iyi.
+- **2 veya 3:** Normal.
+- **4 ve üzeri:** Index çok büyümüş veya bozulmuş olabilir, rebuild düşünülmelidir.
+
+### B. Clustering Factor
+Indexin tablo verileriyle ne kadar uyumlu (sıralı) olduğunu gösterir.
+- Eğer **Clustering Factor** tablo satır sayısına (`num_rows`) yakınsa, index tabloyla aynı sırada değildir (Kötü).
+- Eğer tablo blok sayısına (`blocks`) yakınsa, index tabloyla mükemmel uyumludur (İyi).
+
+```sql
+SELECT index_name, 
+       blevel, 
+       leaf_blocks, 
+       clustering_factor, 
+       num_rows
+FROM dba_indexes
+WHERE table_name = 'SIPARISLER';
+```
+
+---
+
+## 2. Ne Zaman Rebuild Yapılmalı?
+
+Index rebuild işlemi her zaman çözüm değildir. Ancak şu durumlarda faydalıdır:
+- Index çok fazla DELETE işlemi görmüşse ve yaprak blokları (`leaf_blocks`) boşsa.
+- Indexi farklı bir `TABLESPACE`'e taşımak istiyorsanız.
+- Indexin fiziksel yapısını optimize etmek (Storage parametrelerini değiştirmek) gerekiyorsa.
+
+---
+
+## 3. Güvenli Index Rebuild (Online)
+
+Üretim sistemlerinde index rebuild yaparken sistemi durdurmamak için mutlaka `ONLINE` parametresini kullanmalısınız.
+
+```sql
+-- Indexi mevcut tablespace'inde rebuild et
+ALTER INDEX HR.EMP_NAME_IDX REBUILD ONLINE;
+
+-- Indexi yeni bir tablespace'e taşıyarak rebuild et
+ALTER INDEX HR.EMP_NAME_IDX REBUILD TABLESPACE DATA_IDX_NEW ONLINE;
+
+-- Partitioned bir indexin sadece bir parçasını rebuild et
+ALTER INDEX SALES_DATE_IDX REBUILD PARTITION P_2023_01 ONLINE;
+```
+
+---
+
+## 4. Toplu Rebuild Scripti Üretme
+
+Fragmentasyon oranı yüksek olan indexleri otomatik olarak rebuild etmek için script üretebilirsiniz:
+
+```sql
+SELECT 'ALTER INDEX '||owner||'.'||index_name||' REBUILD ONLINE;'
+FROM dba_indexes
+WHERE owner = 'UYGULAMA_USER'
+  AND blevel > 3
+  AND status = 'VALID';
+```
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **İstatistikleri Güncel Tutun:** Yanlış kararlar vermemek için önce istatistikleri toplayın:
+    `EXEC DBMS_STATS.GATHER_INDEX_STATS('HR', 'EMP_NAME_IDX');`
+-   **Önce Analiz Et:** Sadece `BLEVEL` yüksek diye rebuild yapmayın. Eğer sorgular hala hızlıysa ve index çok sık değişmiyorsa dokunmayın.
+-   **Boşlukları Geri Kazan:** Eğer tablodan büyük miktarda veri sildiyseniz, indexi rebuild etmek disk alanını (`SYSAUX` veya veri tablespace'i) geri kazandırır.
+
+Index yönetimi, veritabanı performansını sürdürülebilir kılmanın en temel adımlarından biridir. Doğru analizlerle sisteminizi her zaman fit ve hızlı tutabilirsiniz.

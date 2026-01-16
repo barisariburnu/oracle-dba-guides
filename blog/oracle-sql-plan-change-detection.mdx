@@ -1,0 +1,100 @@
+---
+title: "Oracle SQL Plan Değişikliklerinin Tespiti ve Performans Analizi"
+description: "AWR ve ASH verilerini kullanarak SQL execution plan regülasyonlarını tespit etme, en çok beklemeye neden olan sorguları analiz etme ve performans iyileştirme rehberi."
+date: 2026-01-16
+category: "Oracle Performans"
+tags: ["oracle", "sql plan", "awr", "ash", "performance tuning", "plan regression", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Plan Değişikliklerinin Tespiti ve Performans Analizi
+
+Oracle veritabanlarında performans düşüşlerinin en yaygın nedenlerinden biri, bir sorgunun çalışma planının (Execution Plan) aniden değişmesidir. Buna "Plan Regression" denir. Bu makalede, AWR (Automatic Workload Repository) ve ASH (Active Session History) verilerini kullanarak plan değişikliklerini nasıl tespit edebileceğimizi inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Plan Değişikliği Olur?
+
+Sorgu planları şu nedenlerle değişebilir:
+- Yeni istatistiklerin toplanması (Statistics gathering)
+- Veritabanı parametre değişiklikleri
+- Upgrade veya patch işlemleri
+- Veri miktarındaki büyük değişimler
+- Index ekleme veya silme işlemleri
+
+## SQL Plan Değişim Analizi Scripti
+
+Aşağıdaki script, AWR geçmişindeki snap_id'leri kullanarak bir SQL_ID için birden fazla plan üretilip üretilmediğini kontrol eder. Özellikle son 10 dakika içinde en çok beklemeye (wait) neden olan 5 sorguyu analiz eder.
+
+### SQL Sorgusu: Plan Regression Tespiti
+
+```sql
+set linesize 200
+set pagesize 2000
+
+SELECT to_char(BEGIN_INTERVAL_TIME, 'DD.MM-HH24:MI') baslangic,
+       to_char(END_INTERVAL_TIME, 'DD.MM-HH24:MI') bitis,
+       sq.snap_id,
+       sq.sql_id,
+       sq.plan1,
+       st.sql_text
+FROM sys.WRH$_SQLTEXT st,
+     sys.WRM$_SNAPSHOT snap,
+     (SELECT DISTINCT s1.sql_id sql_id,
+                      s1.plan_hash_value plan1,
+                      s1.snap_id
+      FROM sys.WRH$_SQL_PLAN S1,
+           sys.WRH$_SQL_PLAN S2
+      WHERE s1.sql_id = s2.sql_id
+        AND s1.plan_hash_value <> s2.plan_hash_value
+        AND s1.id = 1) sq
+WHERE sq.sql_id = st.sql_id
+  AND sq.snap_id = snap.snap_id (+)
+  AND st.sql_id IN (
+      SELECT sql_id
+      FROM (
+          -- Son 10 dakikada en cok beklemeye neden olan SQLlerin plan kaymasini kontrol eder
+          SELECT count(*) cnt,
+                 sum(time_waited) tot_time_waited,
+                 sql_id,
+                 event
+          FROM v$active_session_history s
+          WHERE sample_time > sysdate - 10 / 24 / 60
+          GROUP BY sql_id, event
+          HAVING count(*) > 1
+          ORDER BY sum(time_waited) desc
+      )
+      WHERE rownum < 6
+  )
+ORDER BY sql_id;
+```
+
+## Sorgu Nasıl Çalışır?
+
+1. **ASH Analizi:** `v$active_session_history` üzerinden son 10 dakikada en çok kaynak tüketen SQL_ID'leri belirler.
+2. **AWR Karşılaştırması:** Bu SQL_ID'lerin AWR (`WRH$_SQL_PLAN`) geçmişinde farklı `plan_hash_value` değerlerine sahip olup olmadığını sorgular.
+3. **Detaylandırma:** Farklı planlara sahip olan SQL'lerin metinlerini ve hangi zaman aralığında (snapshot) hangi plana geçtiklerini raporlar.
+
+<Callout type="info" title="İpucu">
+Eğer bir sorgunun `plan_hash_value` değeri değişmişse ve performans düşmüşse, eski (iyi çalışan) planı **SQL Plan Baseline** kullanarak dondurabilirsiniz.
+</Callout>
+
+## Plan Değişikliği Sonrası Alınacak Aksiyonlar
+
+Eğer bir plan regresyonu tespit ederseniz:
+
+1. **Planları Karşılaştırın:** `DBMS_XPLAN.DISPLAY_AWR` kullanarak her iki planın maliyetlerini (cost) ve adımlarını inceleyin.
+2. **İstatistikleri Kontrol Edin:** İlgili tabloların istatistiklerinin ne zaman güncellendiğini (`last_analyzed`) kontrol edin.
+3. **Baseline Oluşturun:** İyi olan planı sabitlemek için:
+   ```sql
+   VAR res NUMBER;
+   EXEC :res := DBMS_SPM.LOAD_PLANS_FROM_CURSOR_CACHE(sql_id => 'your_sql_id', plan_hash_value => 'good_plan_hash');
+   ```
+
+## Sonuç
+
+SQL plan değişikliklerini izlemek, proaktif veritabanı yönetiminin en gelişmiş adımlarından biridir. Sadece "sistem yavaş" demek yerine, hangi sorgunun hangi plandan hangi plana geçtiğini bu script ile anında tespit edebilir ve hızlıca müdahale edebilirsiniz.
+
+<Callout type="warning" title="Önemli Not">
+Bu script AWR view'lerini kullandığı için veritabanınızda **Diagnostics and Tuning Pack** lisansının olması gerekmektedir.
+</Callout>

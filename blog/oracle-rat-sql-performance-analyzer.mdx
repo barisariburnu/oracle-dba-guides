@@ -1,0 +1,111 @@
+---
+title: "Oracle Real Application Testing (RAT): SQL Performance Analyzer (SPA)"
+description: "Oracle veritabanı yükseltme veya konfigürasyon değişiklikleri öncesinde, iş yükünün performansını test etmek için SQL Performance Analyzer (SPA) kullanımı."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle RAT", "SPA", "SQL Performance", "Upgrade Testing", "DBA", "Regression Testing"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Real Application Testing (RAT) ve SPA
+
+Veritabanında yapılan bir değişiklik (Upgrade, Index ekleme, Parametre değişimi vb.) binlerce sorgunun performansını etkileyebilir. Bu etkinin ne yönde olacağını önceden tahmin etmek zordur. Oracle **Real Application Testing (RAT)** çatısı altında sunulan **SQL Performance Analyzer (SPA)**, bu belirsizliği ortadan kaldırır. SPA, bir iş yükünü (SQL Tuning Set) alır ve değişikliğin bu iş yükündeki her bir sorgu üzerindeki etkisini raporlar.
+
+
+<!--truncate-->
+Bu makalede, bir Upgrade öncesinde SPA adımlarını nasıl uygulayacağımızı inceleyeceğiz.
+
+## 1. SQL Tuning Set (STS) Oluşturma
+
+İlk adım, test etmek istediğimiz gerçek iş yükünü (SQL'leri) yakalamaktır. Bu veriler Cursor Cache'den veya geçmişe dönük AWR verilerinden çekilebilir.
+
+```sql
+BEGIN
+  DBMS_SQLTUNE.CREATE_SQLSET(sqlset_name => 'PROD_WORKLOAD');
+  
+  -- Cursor Cache'den verileri doldur
+  DBMS_SQLTUNE.CAPTURE_CURSOR_CACHE_SQLSET(
+    sqlset_name => 'PROD_WORKLOAD',
+    time_limit  => 3600, -- 1 saat boyunca yakala
+    repeat_interval => 10
+  );
+END;
+/
+```
+
+---
+
+## 2. SPA Analiz Görevi Oluşturma
+
+Yakalanan bu iş yükünü analiz etmek için bir SPA görevi oluştururuz.
+
+```sql
+DECLARE
+  l_task_name VARCHAR2(100);
+BEGIN
+  l_task_name := DBMS_SQLPA.CREATE_ANALYSIS_TASK(
+    sqlset_name => 'PROD_WORKLOAD',
+    task_name   => 'SPA_UPGRADE_TEST'
+  );
+END;
+/
+```
+
+---
+
+## 3. Karşılaştırmalı Deneyler (Experiments)
+
+SPA, belirlediğiniz iş yükünü iki farklı durum için "çalıştırır" (veya tahmin eder) ve sonuçları karşılaştırır.
+
+-   **Deney 1 (Baseline):** Değişiklik öncesi durum.
+-   **Deney 2 (Target):** Değişiklik sonrası (Upgrade, Index vb.) durum.
+
+```sql
+-- Değişiklik öncesi analizi çalıştır (Örn: 11g durumu)
+BEGIN
+  DBMS_SQLPA.EXECUTE_ANALYSIS_TASK(
+    task_name      => 'SPA_UPGRADE_TEST',
+    execution_type => 'TEST EXECUTE',
+    execution_name => 'BEFORE_UPGRADE');
+END;
+/
+
+-- (Değişiklik yapılır, örn: Veritabanı yükseltilir)
+
+-- Değişiklik sonrası analizi çalıştır (Örn: 19c durumu)
+BEGIN
+  DBMS_SQLPA.EXECUTE_ANALYSIS_TASK(
+    task_name      => 'SPA_UPGRADE_TEST',
+    execution_type => 'TEST EXECUTE',
+    execution_name => 'AFTER_UPGRADE');
+END;
+/
+```
+
+---
+
+## 4. Karşılaştırma ve Raporlama
+
+Son adımda, iki deney arasındaki farkları analiz edip bir HTML raporu alıyoruz.
+
+```sql
+-- Karşılaştırma yap
+BEGIN
+  DBMS_SQLPA.EXECUTE_ANALYSIS_TASK(
+    task_name      => 'SPA_UPGRADE_TEST',
+    execution_type => 'COMPARE PERFORMANCE',
+    execution_params => arglist('comparison_metric', 'elapsed_time'));
+END;
+/
+
+-- Raporu oluştur
+SELECT DBMS_SQLPA.REPORT_ANALYSIS_TASK('SPA_UPGRADE_TEST') FROM dual;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Düşük Risk:** SPA raporu; "iyileşenler", "kötüleşenler" (regressed) ve "değişmeyenler" şeklinde net bir özet sunar.
+-   **Önleyici Müdahale:** Kötüleşen (regressed) sorgular için henüz canlıya geçmeden SQL Profile veya Baseline oluşturarak sorunu kökten çözebilirsiniz.
+-   **Index Analizi:** Bir tabloya yeni bir indeks eklemenin tüm sorgular üzerindeki etkisini görmek için SPA en güvenli yoldur.
+
+SQL Performance Analyzer, "Denedik ama sistem yavaşladı" cümlesini DBA literatüründen silen, bilimsel ve güvenilir bir test aracıdır.

@@ -1,0 +1,76 @@
+---
+title: "Oracle 12c Yenilikleri: Multitenant Mimari (CDB/PDB) ve Önemli Özellikler"
+description: "Oracle 12c ile gelen en büyük değişim olan Multitenant mimari, Container ve Pluggable veritabanı yönetimi (CDB/PDB) ve diğer önemli yenilikler."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle 12c", "CDB", "PDB", "Multitenant", "Online Operations", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle 12c Yenilikleri ve Multitenant Mimari
+
+Oracle 12c (c = Cloud), veritabanı dünyasına devrim niteliğinde yenilikler getirdi. Bu yeniliklerin en başında, birden fazla veritabanının tek bir yönetim çatısı altında toplanmasını sağlayan **Multitenant Mimari** gelmektedir. Ayrıca, operasyonel süreçleri kolaylaştıran "Online" operasyonlar da bu sürümle hayatımıza girmiştir.
+
+
+<!--truncate-->
+Bu makalede, Oracle 12c'nin kalbi olan CDB/PDB yapısına ve öne çıkan yeni özelliklerine göz atacağız.
+
+## 1. Multitenant Mimari: CDB ve PDB
+
+Bu mimaride iki ana kavram vardır:
+-   **CDB (Container Database):** Ana gövdeyi temsil eder. Bellek, arka plan süreçleri ve sistem dosyaları burada ortaktır.
+-   **PDB (Pluggable Database):** Ana gövdeye takılıp çıkarılabilir, bağımsız kullanıcı veritabanlarıdır.
+
+### Bağlantı ve Yönetim Komutları
+
+CDB'ye bağlandıktan sonra içerideki PDB'leri görmek ve aralarında geçiş yapmak oldukça kolaydır:
+
+```sql
+-- PDB'lerin listesini ve durumlarını gör
+SHOW PDBS;
+
+-- Belirli bir PDB'ye geçiş yap (Session seviyesinde)
+ALTER SESSION SET CONTAINER = PDB_FINANS;
+
+-- PDB'yi açmak veya kapatmak
+ALTER PLUGGABLE DATABASE PDB_FINANS OPEN;
+ALTER PLUGGABLE DATABASE PDB_FINANS CLOSE IMMEDIATE;
+
+-- Tüm PDB'leri aynı anda açmak
+ALTER PLUGGABLE DATABASE ALL OPEN;
+```
+
+---
+
+## 2. Online Operasyonlar: Kesintisiz Yönetim
+
+Oracle 12c öncesinde veri dosyası (datafile) taşıma veya partisyon operasyonları için tabloyu veya dosyayı offline hale getirmek gerekebiliyordu. 12c ile bu işlemler tamamen "online" yapılabiliyor.
+
+### Online Datafile Taşıma
+Veritabanı açıkken ve kullanıcılar işlem yapıyorken bir veri dosyasını başka bir diske taşıyabilirsiniz:
+
+```sql
+ALTER DATABASE MOVE DATAFILE '/u01/old_path/data01.dbf' 
+TO '/u02/new_path/data01.dbf';
+```
+
+### Online Partition Taşıma/Değiştirme
+```sql
+ALTER TABLE satislar MOVE PARTITION satis_2023 
+TABLESPACE yeni_ts ONLINE;
+```
+
+---
+
+## 3. Diğer Önemli 12c Yenilikleri
+
+-   **Identity Columns:** `AUTO_INCREMENT` benzeri otomatik artan kolon desteği geldi.
+-   **Advanced Index Compression:** İndeks boyutlarını performansı bozmadan ciddi oranda düşürür.
+-   **In-Memory Option:** Analitik sorguları hızlandırmak için verilerin bellekte "columnar" formatta saklanması.
+-   **Invisible Columns:** Uygulama tarafından (SELECT *) görülmeyen ancak açıkça çağrıldığında gelen kolonlar.
+
+## Özet ve Gelecek Bakış
+
+Oracle 12c, veritabanı konsolidasyonunu (çok sayıda veritabanını tek bir sunucuda az kaynakla çalıştırma) mümkün kılan Multitenant mimari ile modern bulut stratejilerinin temelini atmıştır. Bu yapı, 19c ve 21c gibi güncel sürümlerde de (artık tek seçenek olarak) devam etmektedir.
+
+Multitenant mimariye geçiş, hem lisans maliyetlerini düşürmek hem de yönetim kolaylığı sağlamak için her DBA'in uzmanlaşması gereken bir alandır.

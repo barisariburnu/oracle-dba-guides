@@ -1,0 +1,379 @@
+---
+title: "Oracle Hash Partition Index: Yüksek Hacimli Sistemlerde Performans Optimizasyonu"
+description: "Oracle veritabanında index contention sorunlarını aşmak için normal indexleri Hash Partition Index'e dönüştürme ve I/O optimizasyonu rehberi."
+date: "2025-01-16"
+category: "Performans"
+tags: ["Hash Partitioning", "Index Optimization", "High Volume Tables", "Performance Tuning", "Partitioning Strategy"]
+author: "Oracle DBA"
+coverImage: "/images/placeholder.png"
+---
+
+# Oracle Hash Partition Index: Yüksek Hacimli Sistemlerde Performans Optimizasyonu
+
+Yüksek trafikli (High Transactional) Oracle veritabanlarında, saniyeler içinde binlerce `INSERT` veya `UPDATE` işleminin yapıldığı tablolarda geleneksel B-Tree indeksler zamanla darboğaz oluşturmaya başlar. "Index Contention" olarak bilinen bu durum, özellikle indeksin en sağındaki yapraklarda (Hot Blocks) yoğunlaşan kilitlenmelerle kendini gösterir. Bu makalede, bu performansı engelleyen durumları aşmak için mevcut indekslerinizi nasıl **Hash Partitioned Index** yapısına dönüştüreceğinizi ve I/O dağılımını nasıl optimize edeceğinizi öğreneceğiz.
+
+
+<!--truncate-->
+Hash Partitioning, verinin fiziksel olarak birden fazla partisyona dağıtılmasını sağlayarak hem yazma hızını artırır hem de paralel sorgu performansını zirveye taşır.
+
+<Callout type="info">
+**Mimari Avantaj:** Hash Partitioned Index, tek bir "Hot Block" üzerine binen yükü, indeks partisyonları arasına dağıtarak **Buffer Cache Contention** ve **Enq: TX - Index Contention** beklemelerini minimize eder.
+</Callout>
+
+## Hash Partition Index Nedir?
+
+Oracle'da **hash partitioned index**, index verilerini belirtilen sayıda partition'a dağıtır. Her partition, hash fonksiyonu sonucunda belirlenir ve bu sayede:
+
+- ✅ **I/O dağılımı** improves
+- ✅ **Parallel DML** performansı artar
+- ✅ **Index contention** azalır
+- ✅ **Maintenance operations** hızlanır
+
+## Normal Index'i Hash Partition Index'e Dönüştürme
+
+### 1. Mevcut Index'i Analiz Et
+
+```sql
+-- Mevcut index bilgilerini kontrol et
+SELECT index_name,
+       index_type,
+       partitioned,
+       status,
+       num_rows,
+       leaf_blocks,
+       clustering_factor
+FROM   dba_indexes
+WHERE  table_name = 'YOUR_TABLE'
+AND    index_name = 'YOUR_INDEX';
+```
+
+### 2. Hash Partition Index Oluşturma Syntax
+
+#### Basit Hash Partition Index
+
+```sql
+-- Single column hash partition
+CREATE INDEX owner.idx_name
+ON owner.table_name(column_name)
+GLOBAL PARTITION BY HASH(column_name)
+PARTITIONS 16
+TABLESPACE index_ts;
+```
+
+#### Multi-Column Hash Partition Index
+
+```sql
+-- Multiple column hash partition
+CREATE INDEX ORCLDB.pgm1_mesaj_inout_status
+ON ORCLDB.pgm1_mesaj(status, IN_OUT)
+GLOBAL PARTITION BY HASH(status, IN_OUT)
+PARTITIONS 256
+TABLESPACE INDEXES
+PARALLEL 12;
+```
+
+<Callout type="success">
+**Partition Sayısı Seçimi**
+- 2^n formatında kullanın (16, 32, 64, 128, 256)
+- CPU sayısının katlarını düşünün
+- Parallel degree ile uyumlu olmalı
+- Data volumeüne göre ölçeklendirin
+</Callout>
+
+### 3. Production Örneği - Index Conversion
+
+```sql
+-- Mevcut index'i drop et
+DROP INDEX PR_OSB_CUSTOM.ATTIP_IDEMPOTENCE_REQID_UK;
+
+-- Hash partition index ile recreate et
+CREATE UNIQUE INDEX PR_OSB_CUSTOM.ATTIP_IDEMPOTENCE_REQID_UK
+ON PR_OSB_CUSTOM.ATTIP_IDEMPOTENCE(ATTIP_REQUEST_ID)
+LOGGING
+TABLESPACE TS_PR_OSB_CUSTOM_DATA
+PCTFREE 10
+INITRANS 2
+MAXTRANS 255
+STORAGE (
+  INITIAL 64K
+  NEXT 1M
+  MINEXTENTS 1
+  MAXEXTENTS UNLIMITED
+  PCTINCREASE 0
+  BUFFER_POOL DEFAULT
+)
+NOPARALLEL;
+
+-- Parallel execution ile hash partition index
+DROP INDEX ORCLDB.pgm1_mesaj_inout_status;
+
+CREATE INDEX ORCLDB.pgm1_mesaj_inout_status
+ON ORCLDB.pgm1_mesaj(status, IN_OUT)
+GLOBAL PARTITION BY HASH(status, IN_OUT)
+PARTITIONS 256
+TABLESPACE INDEXES
+PARALLEL 12;
+
+-- Parallel'ı kapat (production best practice)
+ALTER INDEX ORCLDB.pgm1_mesaj_inout_status NOPARALLEL;
+```
+
+## Unique Hash Partition Index
+
+### 1. Unique Index Creation
+
+```sql
+-- Unique hash partition index
+DROP INDEX tts.FATURA_ID_UNQ_NDX;
+
+CREATE UNIQUE INDEX TTS.FATURA_ID_UNQ_NDX
+ON TTS.FATURA(ID)
+GLOBAL PARTITION BY HASH(ID)
+PARTITIONS 256
+TABLESPACE INDEX15
+PARALLEL 12;
+```
+
+### 2. Unique Constraint ile Hash Partition Index
+
+```sql
+-- Unique constraint + hash partition index
+ALTER TABLE tts.fatura
+ADD CONSTRAINT fatura_id_uk
+UNIQUE (id)
+USING INDEX
+(
+  CREATE UNIQUE INDEX tts.fatura_id_uk
+  ON tts.fatura(id)
+  GLOBAL PARTITION BY HASH(id)
+  PARTITIONS 128
+  TABLESPACE index_ts
+);
+```
+
+## Parallel Execution ile Hash Partition Index
+
+### 1. Parallel Degree Belirleme
+
+```sql
+-- Parallel degree seçimi
+SELECT DEGREE,
+       instances
+FROM   dba_indexes
+WHERE  index_name = 'YOUR_INDEX';
+
+-- CPU sayısına göre parallel degree belirle
+-- Küçük sistemler: 2-4
+-- Orta sistemler: 4-8
+- Büyük sistemler: 8-16
+- Exadata: 32+
+```
+
+### 2. Parallel Index Creation Example
+
+```sql
+-- Parallel index creation
+CREATE INDEX owner.hash_idx
+ON owner.large_table(column1, column2)
+GLOBAL PARTITION BY HASH(column1, column2)
+PARTITIONS 64
+TABLESPACE index_ts
+PARALLEL 8;
+
+-- Index sonrası parallel'ı kapat
+ALTER INDEX owner.hash_idx NOPARALLEL;
+```
+
+## Hash Partition Index Maintenance
+
+### 1. Index Rebuild
+
+```sql
+-- Single partition rebuild
+ALTER INDEX owner.hash_idx
+REBUILD PARTITION sys_p001
+ONLINE;
+
+-- Tüm partition'ları rebuild et
+BEGIN
+  FOR part_rec IN (SELECT partition_name
+                   FROM   dba_ind_partitions
+                   WHERE  index_name = 'HASH_IDX'
+                   AND    index_owner = 'OWNER')
+  LOOP
+    EXECUTE IMMEDIATE
+      'ALTER INDEX owner.hash_idx REBUILD PARTITION ' ||
+      part_rec.partition_name || ' ONLINE';
+  END LOOP;
+END;
+/
+```
+
+### 2. Index Statistics
+
+```sql
+-- Index statistics collect
+BEGIN
+  DBMS_STATS.GATHER_INDEX_STATS(
+    ownname => 'OWNER',
+    indname => 'HASH_IDX',
+    estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE,
+    method_opt => 'FOR ALL COLUMNS SIZE AUTO',
+    degree => DBMS_STATS.AUTO_DEGREE
+  );
+END;
+/
+```
+
+## Performance Testing
+
+### 1. Before Conversion - Benchmark
+
+```sql
+-- Mevcut index performansını ölç
+SET AUTOTRACE ON
+SET TIMING ON
+
+SELECT /*+ INDEX(table_name old_index) */
+       COUNT(*)
+FROM   owner.table_name
+WHERE  column_name = :value;
+
+-- Execution plan'ı kontrol et
+SELECT *
+FROM   TABLE(DBMS_XPLAN.DISPLAY_CURSOR);
+```
+
+### 2. After Conversion - Benchmark
+
+```sql
+-- Hash partition index performansını ölç
+SET AUTOTRACE ON
+SET TIMING ON
+
+SELECT /*+ INDEX(table_name hash_partitioned_index) */
+       COUNT(*)
+FROM   owner.table_name
+WHERE  column_name = :value;
+
+-- Execution plan'ı kontrol et
+SELECT *
+FROM   TABLE(DBMS_XPLAN.DISPLAY_CURSOR);
+```
+
+## Partition Strategy Selection
+
+### Hash Partitioning vs Range Partitioning
+
+| Özellik | Hash Partitioning | Range Partitioning |
+|---------|-------------------|-------------------|
+| **Kullanım** | High insert rate,均匀分布 | Date-based, historical data |
+| **Partition Pruning** | Limited | Excellent |
+| **Maintenance** | Easier | More complex |
+| **Rolling Window** | No | Yes |
+| **Parallel Execution** | Excellent | Good |
+| **Use Case** | OLTP, high concurrency | Data warehouse, archival |
+
+### When to Use Hash Partitioning
+
+✅ **Ideal for**:
+- High-volume OLTP tables
+- Frequent INSERT/UPDATE operations
+- Uniform data distribution needed
+- Parallel DML operations
+- Buffer cache optimization
+
+❌ **Not ideal for**:
+- Date-based queries
+- Historical data analysis
+- Rolling window operations
+- Partition pruning required
+
+## Monitoring and Troubleshooting
+
+### 1. Partition-Level Statistics
+
+```sql
+-- Her partition'ın statistics'ini görüntüle
+SELECT partition_name,
+       num_rows,
+       leaf_blocks,
+       clustering_factor,
+       status
+FROM   dba_ind_partitions
+WHERE  index_name = 'HASH_IDX'
+ORDER BY partition_position;
+```
+
+### 2. Index Usage Statistics
+
+```sql
+-- Index kullanım istatistikleri
+SELECT index_name,
+       table_name,
+       used,
+       monitored,
+       start_monitoring
+FROM   v$object_usage
+WHERE  index_name = 'HASH_IDX';
+```
+
+### 3. Partition Skew Detection
+
+```sql
+-- Partition skew kontrolü
+SELECT partition_name,
+       num_rows,
+       ROUND(num_rows / SUM(num_rows) OVER() * 100, 2) AS pct_total
+FROM   dba_ind_partitions
+WHERE  index_name = 'HASH_IDX'
+ORDER BY num_rows DESC;
+```
+
+<Callout type="warning">
+**Partition Skew Uyarısı**
+Eğer partition'lar arasında %50+ fark varsa, hash function veya partition sayısı **yanlış seçilmiş** olabilir. Rebuild etmeyi düşünün.
+</Callout>
+
+## Best Practices
+
+### ✅ DO's
+
+1. **2^n partition sayısı**: 16, 32, 64, 128, 256 kullanın
+2. **Parallel execution**: Creation sırasında kullanın, sonra kapatın
+3. **Online rebuild**: Production downtime'siz maintenance
+4. **Statistics gathering**: İndex sonrası mutlaka collect edin
+5. **Monitoring**: Partition skew ve usage stats'i takip edin
+6. **Test environment**: Öncelikle test'te deneyin
+
+### ❌ DON'Ts
+
+1. **Özensiz partition sayısı**: Random sayılar kullanmayın
+2. **Production'da test etmeden koyma**: Önce test'te doğrulayın
+3. **Parallel açık bırakma**: Normal operation'da kapatın
+4. **Statistics forget etmeyin**: Index sonrası mutlaka gather edin
+5. **Monitor etmeden bırakma**: Regular check yapın
+
+## Migration Checklist
+
+- [ ] Mevcut index'in size ve usage'ını analiz et
+- [ ] Partition sayısını belirle (CPU, data volume based)
+- [ ] Parallel degree seç
+- [ ] Test environment'de oluştur
+- [ ] Performance comparison yap
+- [ ] Production maintenance window'u planla
+- [ ] Index'i drop et ve recreate et
+- [ ] Statistics gather et
+- [ ] Application testing yap
+- [ ] Monitoring setup et
+
+## İlgili Kaynaklar
+
+- [Oracle Partitioning Guide](https://docs.oracle.com/en/database/oracle/oracle-database/)
+- [Index Performance Tuning](/blog/oracle-index-rebuild-unusable)
+- [Partition Management](/blog/oracle-automatic-partition-creation)
+
+<Callout type="success">
+**Özet**
+Hash partition index'ler, yüksek volume ve yüksek concurrency senaryolarda **significant performance improvement** sağlar. Doğru partition sayısı, parallel execution ve regular monitoring ile production OLTP sistemlerde **mükemmel sonuçlar** verir.
+</Callout>

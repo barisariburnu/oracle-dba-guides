@@ -1,0 +1,445 @@
+---
+title: "Oracle Scheduler Job Monitoring ve Hata Tespiti"
+description: "Başarısız Oracle scheduler job'larını tespit etme, job performansını izleme ve otomatik job monitoring rehberi."
+date: 2026-01-16
+category: "Oracle Monitoring"
+tags: ["oracle", "scheduler job", "job monitoring", "automation", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Scheduler Job Monitoring ve Hata Tespiti
+
+Oracle Scheduler job'larının düzenli çalışması, otomatik iş süreçlerinin kritik bir parçasıdır. Başarısız job'ların hızlı tespiti ve troubleshooting edilmesi, veritabanı yönetiminin önemli görevlerinden biridir.
+
+
+<!--truncate-->
+## Job Monitoring Önemi
+
+Scheduler job monitoring ile şunları sağlayabilirsiniz:
+
+- Başarısız job'ları anında tespit edin
+- Job performans sorunlarını belirleyin
+- Hata sekillerini analiz edin
+- Job SLA uyumluluğunu kontrol edin
+- Proaktif sorun çözümü yapın
+
+<Callout type="warning" title="Kritik Uyarı">
+Başarısız job'lar iş süreçlerini durdurabilir, data inconsistency yaratabilir ve kullanıcı deneyimini olumsuz etkileyebilir. Günlük monitoring esastır.
+</Callout>
+
+## Script Özellikleri
+
+Bu monitoring scripti şu bilgileri sağlar:
+
+- Son 2 gün içinde başarısız olan job'ları listeler
+- Job çalışma süresini saniye cinsinden hesaplar
+- Hata kodlarını ve ek bilgileri gösterir
+- Sahip adı, job adı ve log tarihine göre sıralar
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri (Scheduler ile birlikte)
+- SYSDBA yetkisi veya DBA role
+- `DBA_SCHEDULER_JOB_RUN_DETAILS` view'ine erişim
+
+## Script İçeriği
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT owner,
+       job_name,
+       status,
+       LOG_DATE,
+       ERROR#,
+       (EXTRACT(SECOND FROM run_duration) +
+        EXTRACT(MINUTE FROM run_duration) * 60 +
+        EXTRACT(HOUR FROM run_duration) * 3600 +
+        EXTRACT(DAY FROM run_duration) * 3600 * 24) SECONDS,
+       ADDITIONAL_INFO
+  FROM dba_scheduler_job_run_details
+ WHERE LOG_DATE > SYSDATE - 2
+   AND status != 'SUCCEEDED'
+ORDER BY 1 ASC, 5 DESC;
+
+exit;
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama | Örnek Değer |
+|-------|----------|-------------|
+| **OWNER** | Job sahibi | SYS, SYSTEM, APP_OWNER |
+| **JOB_NAME** | Job adı | DAILY_BACKUP, CLEANUP_JOB |
+| **STATUS** | Durum | FAILED, FAILED OVER |
+| **LOG_DATE** | Log tarihi | 16-JAN-26 10:30:45 |
+| **ERROR#** | Hata kodu | ORA-01653, ORA-01555 |
+| **SECONDS** | Çalışma süresi (saniye) | 125, 3600 |
+| **ADDITIONAL_INFO** | Ek bilgi | ORA-01653: unable to extend... |
+
+## Örnek Çıktı
+
+```
+OWNER      JOB_NAME          STATUS        LOG_DATE            ERROR#    SECONDS  ADDITIONAL_INFO
+---------- --------------- ------------- ------------------- ---------- -------- ------------------
+APP_USER   DATA_LOAD        FAILED        16-JAN-26 02:15:30  ORA-01653   125     ORA-01653: unable...
+SYSTEM     CLEANUP_TEMP     FAILED        16-JAN-26 03:00:00  ORA-01555   45      ORA-01555: snapshot...
+SYS        DAILY_BACKUP     FAILED        15-JAN-26 22:00:00  ORA-27369  7200    ORA-27369: job of type...
+```
+
+## Hata Türleri ve Çözümleri
+
+### 1. ORA-01653: Unable to Extend Tablespace
+
+**Neden:** Tablespace dolu
+
+**Çözüm:**
+
+```sql
+-- Tablespace dolulukunu kontrol edin
+SELECT tablespace_name, ROUND(used_percent, 2)
+FROM (SELECT a.tablespace_name,
+             ROUND((a.bytes - NVL(f.bytes,0))/a.bytes * 100, 2) used_percent
+        FROM (SELECT tablespace_name, SUM(bytes) bytes
+                FROM dba_data_files GROUP BY tablespace_name) a,
+             (SELECT tablespace_name, SUM(bytes) bytes
+                FROM dba_free_space GROUP BY tablespace_name) f
+       WHERE a.tablespace_name = f.tablespace_name(+))
+WHERE used_percent > 85;
+
+-- Tablespace büyütün
+ALTER TABLESPACE users ADD DATAFILE '/path/to/file.dbf' SIZE 1G;
+```
+
+### 2. ORA-01555: Snapshot Too Old
+
+**Neden:** Undo tablespace yetersiz veya undo retention çok kısa
+
+**Çözüm:**
+
+```sql
+-- Undo parametrelerini kontrol edin
+SHOW PARAMETER undo;
+
+-- Undo retention artırın
+ALTER SYSTEM SET undo_retention = 3600 SCOPE=BOTH;
+
+-- Undo tablespace büyütün
+ALTER DATABASE DATAFILE '/path/to/undotbs01.dbf' RESIZE 2G;
+```
+
+### 3. ORA-27369: Job of Type Executable Failed
+
+**Neden:** External job script sorunu veya permission sorunu
+
+**Çözüm:**
+
+```bash
+# Script'i test edin
+/u01/app/oracle/scripts/myjob.sh
+
+# Permission'ları kontrol edin
+ls -l /u01/app/oracle/scripts/myjob.sh
+chmod 755 /u01/app/oracle/scripts/myjob.sh
+
+# Oracle kullanıcısı ile test edin
+su - oracle
+/u01/app/oracle/scripts/myjob.sh
+```
+
+## Gelişmiş Monitoring Sorguları
+
+### Job Performans Analizi
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT owner,
+       job_name,
+       COUNT(*) AS run_count,
+       SUM(CASE WHEN status = 'SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded,
+       SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+       ROUND(AVG((EXTRACT(DAY FROM run_duration) * 86400 +
+                 EXTRACT(HOUR FROM run_duration) * 3600 +
+                 EXTRACT(MINUTE FROM run_duration) * 60 +
+                 EXTRACT(SECOND FROM run_duration))), 2) AS avg_seconds,
+       ROUND(MAX((EXTRACT(DAY FROM run_duration) * 86400 +
+                 EXTRACT(HOUR FROM run_duration) * 3600 +
+                 EXTRACT(MINUTE FROM run_duration) * 60 +
+                 EXTRACT(SECOND FROM run_duration))), 2) AS max_seconds
+  FROM dba_scheduler_job_run_details
+ WHERE LOG_DATE > SYSDATE - 7
+GROUP BY owner, job_name
+ORDER BY failed DESC, avg_seconds DESC;
+```
+
+### Job Hata Trend Analizi
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT TRUNC(log_date) DAY,
+       COUNT(*) AS total_jobs,
+       SUM(CASE WHEN status = 'SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded,
+       SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+       ROUND(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) / COUNT(*) * 100, 2) AS failure_rate
+  FROM dba_scheduler_job_run_details
+ WHERE LOG_DATE > SYSDATE - 30
+GROUP BY TRUNC(log_date)
+ORDER BY DAY DESC;
+```
+
+### En Sık Hata Veren Job'lar
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT owner,
+       job_name,
+       ERROR#,
+       COUNT(*) AS error_count,
+       MAX(LOG_DATE) AS last_error_date
+  FROM dba_scheduler_job_run_details
+ WHERE LOG_DATE > SYSDATE - 30
+   AND status = 'FAILED'
+GROUP BY owner, job_name, ERROR#
+ORDER BY error_count DESC;
+```
+
+### Aktif Job Durumu
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT job_name,
+       state,
+       date_format,
+       next_run_date,
+       last_start_date,
+       last_run_duration,
+       failure_count
+  FROM dba_scheduler_jobs
+ WHERE state = 'ENABLED'
+ORDER BY next_run_date;
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Job Kontrolü
+
+```bash
+#!/bin/bash
+# job_check.sh
+
+FAILED_COUNT=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT COUNT(*) FROM dba_scheduler_job_run_details WHERE LOG_DATE > TRUNC(SYSDATE) AND status = 'FAILED';
+EOF
+)
+
+echo "Failed jobs today: $FAILED_COUNT"
+
+if [ $FAILED_COUNT -gt 0 ]; then
+    sqlplus -s / as sysdba @hatali_job.sql > /tmp/failed_jobs.txt
+    mail -s "ALARM: $FAILED_COUNT failed jobs detected" dba@company.com < /tmp/failed_jobs.txt
+fi
+```
+
+### 2. Job Performans Alarmı
+
+```sql
+-- Job süresi threshold'ı aşarsa alarm oluştur
+BEGIN
+  FOR rec IN (SELECT job_name,
+                      run_duration,
+                      (EXTRACT(DAY FROM run_duration) * 86400 +
+                       EXTRACT(HOUR FROM run_duration) * 3600 +
+                       EXTRACT(MINUTE FROM run_duration) * 60 +
+                       EXTRACT(SECOND FROM run_duration)) total_seconds
+                 FROM dba_scheduler_job_run_details
+                 WHERE LOG_DATE > SYSDATE - 1
+                   AND status = 'SUCCEEDED') LOOP
+
+    IF rec.total_seconds > 3600 THEN -- 1 saatten fazla
+      INSERT INTO job_performance_alert (job_name, run_duration_seconds, alert_date)
+      VALUES (rec.job_name, rec.total_seconds, SYSDATE);
+      COMMIT;
+    END IF;
+  END LOOP;
+END;
+/
+```
+
+### 3. Job Rerun (Otomatik Retry)
+
+```sql
+-- Başarısız job'ı manuel olarak tekrar çalıştırın
+BEGIN
+  DBMS_SCHEDULER.RUN_JOB('APP_USER.DATA_LOAD');
+END;
+/
+```
+
+### 4. Job Log Cleanup
+
+```sql
+-- Eski job log'larını temizleyin (30 günden eski)
+BEGIN
+  DBMS_SCHEDULER.PURGE_LOG(
+    log_history => 30,
+    job_name => NULL,
+    which_log => 'JOB_LOG'
+  );
+END;
+/
+```
+
+## Job Troubleshooting Checklist
+
+### 1. Job Durumunu Kontrol Edin
+
+```sql
+-- Job enabled mı?
+SELECT job_name, enabled, state FROM dba_scheduler_jobs WHERE job_name = 'YOUR_JOB';
+
+-- Job son çalışma detayları
+SELECT * FROM dba_scheduler_job_run_details WHERE job_name = 'YOUR_JOB' ORDER BY log_date DESC FETCH FIRST 5 ROWS ONLY;
+```
+
+### 2. Job Arguments Kontrol Edin
+
+```sql
+-- Job argümanlarını görüntüleyin
+SELECT job_name, argument_name, value, argument_position
+  FROM dba_scheduler_job_args
+ WHERE job_name = 'YOUR_JOB'
+ORDER BY argument_position;
+```
+
+### 3. Job Schedule Kontrol Edin
+
+```sql
+-- Job schedule'ı görün
+SELECT job_name, repeat_interval, start_date, end_date
+  FROM dba_scheduler_jobs
+ WHERE job_name = 'YOUR_JOB';
+```
+
+### 4. Job Class ve Window Kontrol Edin
+
+```sql
+-- Job class ve window bilgileri
+SELECT j.job_name,
+       j.job_class,
+       j.job_action,
+       w.window_name,
+       w.duration
+  FROM dba_scheduler_jobs j
+  LEFT JOIN dba_scheduler_wingroup_members wgm ON j.job_name = wgm.job_name
+  LEFT JOIN dba_scheduler_windows w ON wgm.window_name = w.window_name
+ WHERE j.job_name = 'YOUR_JOB';
+```
+
+## Best Practices
+
+### 1. Job Naming Convention
+
+- Prefix kullanın: `DAILY_*`, `HOURLY_*`, `WEEKLY_*`
+- Açıklayıcı isimler: `DAILY_BACKUP_JOB`, `HOURLY_CLEANUP_TEMP`
+- Owner bilgisini içerir: `APP_USER_DAILY_LOAD`
+
+### 2. Error Handling
+
+```sql
+-- Job içinde exception handling kullanın
+BEGIN
+  -- Job logic buraya
+  NULL;
+EXCEPTION
+  WHEN OTHERS THEN
+    -- Log the error
+    INSERT INTO job_error_log (job_name, error_message, error_date)
+    VALUES ('MY_JOB', SQLERRM, SYSDATE);
+    COMMIT;
+    RAISE;
+END;
+/
+```
+
+### 3. Job Documentation
+
+Her job için dokümantasyon oluşturun:
+- Job amacı
+- Çalışma sıklığı
+- Bağımlılıklar
+- Expected runtime
+- Contact person
+
+### 4. Monitoring Threshold'ları
+
+| Metrik | Warning | Critical |
+|--------|---------|----------|
+| Failure rate (günlük) | &gt; 5% | &gt; 10% |
+| Runtime (normal) | +50% | +100% |
+| Failed consecutive | 2 | 3+ |
+
+## Entegrasyon Örnekleri
+
+### Oracle Enterprise Manager
+
+OEM kullanıyorsanız:
+1. Setup → Jobs → Job Activity
+2. Failed jobs filter ekleyin
+3. Email notification configure edin
+
+### Nagios Plugin
+
+```bash
+#!/bin/bash
+# check_oracle_jobs.sh
+
+FAILED=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT COUNT(*) FROM dba_scheduler_job_run_details WHERE LOG_DATE > TRUNC(SYSDATE) AND status = 'FAILED';
+EOF
+)
+
+if [ $FAILED -gt 0 ]; then
+    echo "CRITICAL: $FAILED failed jobs in last 24 hours"
+    exit 2
+else
+    echo "OK: No failed jobs in last 24 hours"
+    exit 0
+fi
+```
+
+## İlgili Görünümler
+
+- `DBA_SCHEDULER_JOBS` - Job tanımları
+- `DBA_SCHEDULER_JOB_RUN_DETAILS` - Job çalışma detayları
+- `DBA_SCHEDULER_JOB_ARGS` - Job argümanları
+- `DBA_SCHEDULER_JOB_LOG` - Job log'ları
+- `USER_SCHEDULER_JOBS` - Kullanıcı job'ları
+
+## Kaynaklar
+
+- Oracle Database Administrator's Guide
+- Oracle Database PL/SQL Packages and Types Reference
+- Oracle Scheduler Documentation
+
+## Sonraki Adımlar
+
+Bu job monitoring scripti ile şunları yapabilirsiniz:
+
+- Otomatik job failure alarm sistemi
+- Job performance dashboard'ı
+- Predictive job runtime analizi
+- Auto-retry mekanizması
+- Job dependency management
+
+Oracle Scheduler job monitoring, otomatik iş süreçlerinin güvenilirliğini garanti altına alır. Bu scriptleri düzenli kullanarak job hatalarını minimize edebilirsiniz.

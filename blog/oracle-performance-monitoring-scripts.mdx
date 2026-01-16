@@ -1,0 +1,403 @@
+---
+title: "Oracle Performans Monitoring Scriptleri - Active Session History ve Wait Events"
+description: "Oracle veritabanı performans monitoring scriptleri. ASH raporları, wait event analizi, SQL monitoring, blocking session tespiti ve performans troubleshooting."
+date: 2025-01-16
+category: "Oracle Performance"
+tags: ["oracle", "performance", "ash", "wait events", "monitoring", "dba", "tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Performans Monitoring Scriptleri
+
+Oracle veritabanı performans troubleshooting'ında **Active Session History (ASH)**, **wait events**, ve **SQL monitoring** verileri kritik önem taşır. Bu yazıda production ortamlarında kullanılan **kapsamlı performans monitoring scriptleri** paylaşacağım.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+ASH verileri her saniye sample alınır ve memory'de tutulur. Performans sorunlarının hızlı tespiti için en etkili tool'dur.
+</Callout>
+
+## Script'in Amacı
+
+Bu scriptler ile şu performans analizleri yapılır:
+
+- **Active Session History** raporları
+- **Wait event** analizi
+- **SQL monitoring** ve execution plan
+- **Blocking session** tespiti
+- **Process ID**'den session bulma
+- **Timeline-based** performans analizi
+
+## Önkoşullar
+
+- **Oracle Diagnostics Pack** lisansı (ASH ve AWR için)
+- **DBA yetkisi**
+- **Enterprise Edition** (Diag Pack özellikleri için)
+
+## Performans Monitoring Scriptleri
+
+### 1. Process ID'den Session Bulma
+
+```sql
+-- İşletim sistemi process ID'sinden Oracle session'ını bul
+-- SPID belirtiniz
+SELECT s.sid,
+       s.serial#,
+       s.sql_id,
+       p.spid,
+       q.sql_fulltext,
+       s.status,
+       s.logon_time
+FROM   v$session s,
+       v$process p,
+       v$sql q
+WHERE  s.paddr = p.addr(+)
+       AND s.sql_id = q.sql_id(+)
+       AND p.spid IN ('&SPID_PLACEHOLDER_1', '&SPID_PLACEHOLDER_2');
+```
+
+**Kullanım Senaryosu:**
+OS'de yüksek CPU tüketen process tespit edildi ve bu process'in hangi session'a ait olduğu bulunmak isteniyor.
+
+### 2. Active Session History - Wait Event Analizi
+
+```sql
+-- İki tarih arasında en çok yaşanan wait event'leri görüntüle
+-- START_DATE ve END_DATE belirtiniz
+SET LINES 2000
+COL event FORMAT a50
+SELECT event,
+       COUNT(*) AS occurrence_count
+FROM   gv$active_session_history
+WHERE  sample_time BETWEEN TO_DATE('01012025 08:00', 'DDMMYYYY HH24:MI')
+                       AND TO_DATE('01012025 18:00', 'DDMMYYYY HH24:MI')
+GROUP  BY event
+ORDER  BY 2 DESC;
+```
+
+**Çıktı Örneği:**
+
+```
+EVENT                                                 OCCURRENCE_COUNT
+---------------------------------------------------- -----------------
+db file scattered read                                        15234
+db file sequential read                                       12456
+direct path read                                              8234
+CPU time                                                       5621
+enq: TX - row lock contention                                 2341
+```
+
+**Analiz:**
+- **db file scattered read:** Full table scan veya fast full index scan
+- **db file sequential read:** Single block read - index access
+- **direct path read:** Direct path operations (parallel query, hash join)
+
+### 3. SQL ID Bazlı Wait Event Analizi
+
+```sql
+-- Belirli bir SQL'in neden olduğu wait event'leri görüntüle
+SET LINES 2000
+COL sql_id FORMAT a15
+COL event FORMAT a50
+SELECT sql_id,
+       event,
+       COUNT(*) AS wait_count
+FROM   v$active_session_history
+WHERE  sample_time BETWEEN TO_DATE('01012025 08:00', 'DDMMYYYY HH24:MI')
+                        AND TO_DATE('01012025 18:00', 'DDMMYYYY HH24:MI')
+       AND event = 'db file scattered read'
+GROUP  BY sql_id,
+          event
+ORDER  BY 3 DESC;
+```
+
+<Callout type="warning" title="Uyarı">
+Bu script'leri production'da çalıştırmadan önce:
+1. TIME RANGE'ini daraltın (maksimum 1-2 saat)
+2. Count(*) sonuçlarını kontrol edin
+3. Aşırı büyük result set'lerden kaçının
+</Callout>
+
+### 4. Objeye Göre Wait Event Analizi
+
+```sql
+-- Belirli bir wait event'in hangi objelerde yoğunlaştığını görüntüle
+SET LINES 2000
+COL object_name FORMAT a30
+SELECT current_obj#,
+       obj_owner,
+       object_name,
+       subobject_name,
+       COUNT(*) AS wait_count
+FROM   (SELECT h.current_obj#,
+               o.owner AS obj_owner,
+               o.object_name,
+               o.subobject_name
+        FROM   v$active_session_history h,
+               dba_objects o
+        WHERE  h.current_obj# = o.object_id
+               AND sample_time BETWEEN TO_DATE('01012025 09:00',
+                                      'DDMMYYYY HH24:MI')
+               AND TO_DATE('01012025 10:00',
+                                      'DDMMYYYY HH24:MI')
+               AND event = 'enq: HW - contention'
+               AND sql_id = '&SQL_ID_PLACEHOLDER')
+GROUP  BY current_obj#,
+          obj_owner,
+          object_name,
+          subobject_name
+ORDER  BY 5 DESC;
+```
+
+**Analiz:**
+- **enq: HW - contention:** High-water mark contention - segment space management
+- **enq: TX - row lock contention:** Row level locking
+- **enq: ST - contention:** Space transaction contention
+
+### 5. Blocking Session Tespiti
+
+```sql
+-- Bloklanan session'ları ve bloklayan session'ları görüntüle
+SET LINES 2000
+COL blocking_session FORMAT a20
+COL event FORMAT a50
+SELECT s.sid,
+       s.serial#,
+       s.status,
+       s.blocking_session,
+       s.event,
+       s.wait_time,
+       s.seconds_in_wait,
+       s.sql_id
+FROM   v$session s
+WHERE  blocking_session IS NOT NULL
+       AND status = 'ACTIVE'
+ORDER  BY seconds_in_wait DESC;
+```
+
+**Çıktı:**
+
+```
+SID    SERIAL# STATUS   BLOCKING_SESSION EVENT                  SECONDS_IN_WAIT
+----- --------- -------- ----------------- -------------------- ---------------
+1234    56789   ACTIVE   987              enq: TX - row lock           2456
+5678    12345   ACTIVE   4321             db file sequential read      1234
+```
+
+**Aksiyon:**
+```sql
+-- Bloklayan session'ı bul
+SELECT sid,
+       serial#,
+       sql_id,
+       logon_time,
+       status
+FROM   v$session
+WHERE  sid = 987;
+
+-- Gerekirse session'ı kill et
+ALTER SYSTEM KILL SESSION '987,56789';
+```
+
+### 6. SQL Monitor Tool - Uzun Süren Sorgular
+
+```sql
+-- SQL Monitor ile şu an çalışan uzun süren sorguları görüntüle
+SET LINES 2000
+COL sql_id FORMAT a15
+COL status FORMAT a10
+SELECT inst_id,
+       sid,
+       session_serial# AS serial#,
+       status,
+       sql_id,
+       sql_exec_id,
+       TO_CHAR(sql_exec_start, 'DD-Mon-YY HH24:MI:SS') AS sql_exec_start,
+       sql_plan_hash_value AS plan_hash,
+       elapsed_time / 1000000 AS elapsed_sec,
+       buffer_gets,
+       disk_reads
+FROM   gv$sql_monitor
+WHERE  status = 'EXECUTING'
+       AND elapsed_time / 1000000 > 1000
+ORDER  BY sql_exec_start;
+```
+
+**Analiz:**
+- **elapsed_time:** Saniye cinsinden çalışma süresi
+- **buffer_gets:** Memory'den okunan block sayısı
+- **disk_reads:** Disk'ten okunan block sayısı
+
+### 7. SQL Monitoring Summary
+
+```sql
+-- SQL ID'ye göre çalışan sorguları grupla
+SET LINES 2000
+COL sql_id FORMAT a15
+SELECT sql_id,
+       COUNT(*) AS execution_count,
+       SUM(elapsed_time / 1000000) AS total_elapsed_sec,
+       AVG(elapsed_time / 1000000) AS avg_elapsed_sec
+FROM   gv$sql_monitor
+WHERE  status = 'EXECUTING'
+GROUP  BY sql_id
+ORDER  BY 2 DESC;
+```
+
+### 8. Session ID'ye Göre Wait Event Geçmişi
+
+```sql
+-- Belirli bir session'ın wait event geçmişini görüntüle
+SET LINES 2000
+COL event FORMAT a50
+SELECT event,
+       blocking_session,
+       COUNT(*) AS occurrence
+FROM   gv$active_session_history
+WHERE  session_id = &SESSION_ID_PLACEHOLDER
+GROUP  BY event,
+          blocking_session
+ORDER  BY 3 DESC;
+```
+
+### 9. Historical Wait Event Analizi (WRH$_)
+
+```sql
+-- DBA_HIST_ACTIVE_SESS_HISTORY tablosundan geçmiş performans verisi
+SET LINES 2000
+COL event FORMAT a50
+SELECT event,
+       COUNT(*) AS occurrence
+FROM   sys.wrh$_active_session_history
+WHERE  sample_time BETWEEN TO_DATE('01012025 00:00', 'DDMMYYYY HH24:MI')
+                       AND TO_DATE('01012025 23:59', 'DDMMYYYY HH24:MI')
+GROUP  BY event
+ORDER  BY 2 DESC
+FETCH FIRST 20 ROWS ONLY;
+```
+
+### 10. Wait Class Bazlı Analiz
+
+```sql
+-- Wait class'larına göre performans analizi
+SET LINES 2000
+COL wait_class FORMAT a20
+COL event FORMAT a50
+SELECT a.wait_class,
+       s.event,
+       COUNT(*) AS occurrence
+FROM   sys.wrh$_active_session_history a,
+       v$session_event s
+WHERE  a.sample_time BETWEEN TO_DATE('01012025 08:00', 'DDMMYYYY HH24:MI')
+                         AND TO_DATE('01012025 18:00', 'DDMMYYYY HH24:MI')
+       AND a.event_id = s.event_id
+GROUP  BY a.wait_class,
+          s.event
+ORDER  BY 3 DESC
+FETCH FIRST 30 ROWS ONLY;
+```
+
+**Wait Class Categories:**
+- **User I/O:** I/O related waits
+- **System I/O:** Background I/O
+- **Concurrency:** Lock and latch contention
+- **Application:** Application-level locks
+- **Commit:** Commit processing
+- **Idle:** Idle waits
+- **Network:** Network waits
+- **Configuration:** Configuration-related waits
+
+## Kullanım Senaryoları
+
+### Senaryo 1: Sabah Saatlerinde Yavaşlama
+
+```sql
+-- 08:00-10:00 arasındaki yoğun wait event'leri
+SELECT event,
+       COUNT(*) AS occurrence,
+       ROUND(COUNT(*) / SUM(COUNT(*)) OVER() * 100, 2) AS pct_total
+FROM   gv$active_session_history
+WHERE  sample_time BETWEEN TRUNC(SYSDATE) + 8/24
+                       AND TRUNC(SYSDATE) + 10/24
+GROUP  BY event
+ORDER  BY 2 DESC
+FETCH FIRST 10 ROWS ONLY;
+```
+
+### Senaryo 2: Top SQL Analysis
+
+```sql
+-- En çok kaynak tüketen SQL'leri bul
+SELECT sql_id,
+       COUNT(*) AS active_sessions,
+       SUM(CASE WHEN wait_class = 'User I/O' THEN 1 ELSE 0 END) AS io_waits,
+       SUM(CASE WHEN wait_class = 'CPU' THEN 1 ELSE 0 END) AS cpu_sessions
+FROM   gv$active_session_history
+WHERE  sample_time > SYSDATE - 1/24
+GROUP  BY sql_id
+ORDER  BY 2 DESC
+FETCH FIRST 20 ROWS ONLY;
+```
+
+### Senaryo 3: Session Timeline Analizi
+
+```sql
+-- Session'ın saatlik aktivitesini görüntüle
+SELECT TO_CHAR(sample_time, 'HH24') AS hour,
+       event,
+       COUNT(*) AS samples
+FROM   gv$active_session_history
+WHERE  session_id = &SESSION_ID
+       AND sample_time > TRUNC(SYSDATE)
+GROUP  BY TO_CHAR(sample_time, 'HH24'),
+          event
+ORDER  BY 1, 3 DESC;
+```
+
+## Performance Best Practices
+
+### 1. ASH Data Retention
+
+```sql
+-- ASH retention period'ı kontrol et
+SHOW PARAMETER ash
+
+-- Örnek çıktı:
+-- NAME                     TYPE    VALUE
+-- ------------------------ ------- ----------------
+-- statistics_level         string  TYPICAL
+-- _ash_sampling_interval   integer 1000
+```
+
+### 2. ASH Report Oluşturma
+
+```sql
+-- ASH report oluştur (SQL*Plus)
+@?/rdbms/admin/ashrpt.sql
+
+-- Gerekli parametreler:
+-- - Report type: TEXT veya HTML
+-- - Begin time: Başlangıç zamanı
+-- - End time: Bitiş zamanı
+-- - Report level: Detail veya Basic
+```
+
+### 3. Real-Time SQL Monitoring
+
+```sql
+-- SQL Monitor'i aktif et
+ALTER SESSION SET sql_monitor = TRUE;
+ALTER SESSION SET sql_monitoring_usage = ALL;
+
+-- Force monitor for specific SQL
+SELECT /*+ MONITOR */ *
+FROM   large_table;
+```
+
+## İlgili Kaynaklar
+
+- [ASH Report Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/19/tgdba/active-session-history.html)
+- [Wait Events Reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/Oracle-Database-Wait-Events.html)
+- [SQL Monitoring Guide](https://docs.oracle.com/en/database/oracle/oracle-database/19/tgdba/sql-monitoring.html)
+
+Bu yazıda performans monitoring scriptlerini öğrendiniz. Diğer tuning ve optimization konuları için blog yazılarımızı takip edin.

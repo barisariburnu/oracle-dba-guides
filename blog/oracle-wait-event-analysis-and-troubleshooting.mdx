@@ -1,0 +1,118 @@
+---
+title: "Oracle Wait Event Analizi: Sistem Darboğazlarını Tespit Etme"
+description: "Oracle veritabanında wait event'leri (bekleme olayları) izleme, Top Wait Events analizi, ASH ve AWR üzerinden geçmiş beklemelerin sorgulanması."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Wait Events", "Performance Tuning", "ASH", "AWR", "V$SESSION_WAIT", "DBA Troubleshooting"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Wait Event Analizi: Performans Darboğazlarını Tespit Etme
+
+Oracle veritabanında bir sorgunun yavaşlaması genellikle "bekleme" kaynaklıdır. SQL sorgusu ya CPU'da işlem yapıyordur (CPU Time) ya da bir kaynak (Disk, Kilit, Network vb.) için bekliyordur (Wait Time). Bu bekleme olaylarına **Wait Events** denir. Bir DBA'nın asli görevi, veritabanının en çok ne beklediğini ("Top Wait Events") bulmak ve bu darboğazı ortadan kaldırmaktır. Bu makalede, anlık ve geçmişe dönük wait event analizi tekniklerini inceleyeceğiz.
+
+
+<!--truncate-->
+## Anlık Wait Event İzleme
+
+Şu anda veritabanında hangi kullanıcıların ne beklediğini görmek için `V$SESSION_WAIT` ve `V$SESSION` view'lerini kullanırız.
+
+```sql
+SELECT s.sid, 
+       s.username, 
+       s.event, 
+       s.state, 
+       s.seconds_in_wait,
+       q.sql_text
+FROM v$session s
+LEFT JOIN v$sql q ON s.sql_id = q.sql_id
+WHERE s.wait_class != 'Idle' -- Boşta bekleyenleri filtrele
+  AND s.status = 'ACTIVE'
+ORDER BY s.seconds_in_wait DESC;
+```
+
+---
+
+## Top Wait Events (Sistemin Genel Durumu)
+
+Instance açıldığından beri sistemin en çok zaman harcadığı (Idle olmayan) olayları listelemek:
+
+```sql
+SELECT * FROM (
+    SELECT event, 
+           total_waits, 
+           time_waited_micro / 1000000 AS time_waited_sec,
+           average_wait / 100 AS avg_wait_ms
+    FROM v$system_event
+    WHERE wait_class != 'Idle'
+    ORDER BY time_waited_micro DESC
+)
+WHERE ROWNUM <= 10;
+```
+
+---
+
+## Geçmişe Dönük Analiz (ASH ve AWR)
+
+Eğer sorun dün yaşandıysa veya belirli bir saat aralığını analiz etmek istiyorsanız, **Active Session History (ASH)** verilerini kullanmalısınız.
+
+### Son 1 Saatteki En Çok Beklenen Olaylar
+```sql
+SELECT event, 
+       COUNT(*) AS wait_count,
+       ROUND(COUNT(*) * 100 / SUM(COUNT(*)) OVER(), 2) AS percentage
+FROM v$active_session_history
+WHERE wait_class != 'Idle'
+  AND event IS NOT NULL
+GROUP BY event
+ORDER BY wait_count DESC;
+```
+
+### Belirli Bir Snapshot Aralığında (AWR) Beklemeler
+```sql
+SELECT event, 
+       SUM(time_waited) / 1000000 AS time_waited_sec
+FROM dba_hist_active_sess_history
+WHERE snap_id BETWEEN :start_snap AND :end_snap
+  AND event IS NOT NULL
+GROUP BY event
+ORDER BY time_waited_sec DESC;
+```
+
+---
+
+## Yaygın Wait Event'ler ve Çözümleri
+
+| Wait Event | Anlamı | Muhtemel Çözüm |
+| :--- | :--- | :--- |
+| **db file sequential read** | Tek blok okuma (Single block I/O). Genellikle index kullanımı. | Index tuning, Buffer Cache artırımı veya yavaş disk kontrolü. |
+| **db file scattered read** | Çoklu blok okuma (Full Table Scan). | Eksik index tespiti, sorgu optimizasyonu. |
+| **log file sync** | Commit sırasında redo log yazılmasını bekleme. | HDD yerine NVMe/SSD kullanımı, gereksiz commit sayısını azaltma. |
+| **enq: TX - row lock contention** | Satır seviyesinde kilit bekleme. | Uygulama tarafında transaction yönetimi, commit/rollback kontrolü. |
+| **buffer busy waits** | Aynı veri bloğuna çok fazla kişi erişiyor (Hot Block). | Partitioning, PCTFREE artırma veya freelists (ASSM) kontrolü. |
+
+---
+
+## Wait Event Histogram (Gecikme Dağılımı)
+
+Sadece saniyeyi değil, bekleme süresinin dağılımını (milisaniye bazında) görmek çok daha profesyonel bir yaklaşımdır:
+
+```sql
+SELECT event, 
+       wait_time_milli, 
+       wait_count
+FROM v$event_histogram
+WHERE event IN ('db file sequential read', 'db file scattered read')
+ORDER BY event, wait_time_milli;
+```
+
+---
+
+## Özet ve DBA Tavsiyeleri
+
+1.  **Idle Olayları Filtreleyin:** `SQL*Net message from client` gibi "bekliyorum ama iş gelmesini bekliyorum" diyen olayları performans analizine dahil etmeyin.
+2.  **Wait Class Odaklanın:** `User I/O`, `System I/O`, `Concurrency` gibi sınıflara göre gruplandırma yaparak sorunun kaynağını (Disk mi? Kilit mi? CPU mu?) hızlıca bulun.
+3.  **AWR Raporlarını Okuyun:** Otomatik iş yükü raporları (AWR), Top 5 bekleme olayını sizin için zaten özetler.
+4.  **Zaman Birimi:** Oracle Genellikle mikro saniye (`micro`) veya mili saniye (`ms`) kullanır. Çevrim yaparken dikkatli olun.
+
+Bu scriptler ve analiz yöntemleri ile veritabanınızın "kalp atışlarını" izleyebilir ve herhangi bir yavaşlamada parmağınızı doğrudan sorunlu noktanın üzerine koyabilirsiniz.

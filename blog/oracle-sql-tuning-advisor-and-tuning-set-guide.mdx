@@ -1,0 +1,142 @@
+---
+title: "Oracle SQL Tuning Advisor ve Tuning Set Management"
+description: "Oracle veritabanında yavaş SQL'leri analiz etme, SQL Tuning Advisor kullanımı, SQL Tuning Set (STS) oluşturma ve performans iyileştirme adımları."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Tuning", "SQL Tuning Advisor", "SQL Tuning Set", "Performance Optimization", "Execution Plan", "DBA Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Tuning Advisor ve Tuning Set Yönetimi
+
+Oracle veritabanında uygulama performansının %80'i yazılan SQL sorgularına bağlıdır. Oracle, veritabanı yöneticilerine (DBA) ve geliştiricilere yavaş çalışan sorguları analiz etmek ve iyileştirmek için **SQL Tuning Advisor** adında çok güçlü bir araç sunar. Bu makalede, bu aracı hem canlı sistemde hem de geçmiş veriler (AWR) üzerinde nasıl kullanacağınızı, ayrıca SQL Tuning Set (STS) kavramını ve yönetimini detaylandıracağız.
+
+
+<!--truncate-->
+## SQL Tuning Advisor Nedir?
+
+SQL Tuning Advisor, bir veya birden fazla SQL sorgusunu girdi olarak alır ve maliyeti (cost), istatistikleri ve erişim yollarını analiz ederek şu başlıklar altında öneriler sunar:
+1.  **İstatistik Önerileri:** Eksik veya eski tablo/index istatistiklerini raporlar.
+2.  **SQL Profili Önerileri:** CBO'nun (Optimizer) daha iyi karar vermesi için ek bilgiler (SQL Profile) oluşturmayı önerir.
+3.  **İndex Önerileri:** Performansı artıracak yeni index yapılarını tarif eder.
+4.  **SQL Rewrite:** Sorgunun daha verimli yazılması için mantıksal değişiklikler önerir.
+
+---
+
+## SQL Tuning Görevi Oluşturma
+
+### 1. Canlı Sistemden (Shared Pool) SQL Tuning
+Aktif olarak bellekte bulunan bir `SQL_ID` için analiz başlatmak:
+
+```sql
+DECLARE
+  l_tuning_task VARCHAR2(30);
+BEGIN
+  l_tuning_task := DBMS_SQLTUNE.CREATE_TUNING_TASK(
+    sql_id      => '5xqm3n6t5k8b2',
+    task_name   => 'tune_orders_sql',
+    time_limit  => 1800, -- 30 dakika limit
+    description => 'Orders tablosu sorgu analizi'
+  );
+  
+  -- Görevi çalıştır
+  DBMS_SQLTUNE.EXECUTE_TUNING_TASK(task_name => 'tune_orders_sql');
+END;
+/
+```
+
+### 2. Geçmiş Verilerden (AWR) SQL Tuning
+Sorun dün yaşandıysa ve SQL artık bellekte değilse, AWR üzerinden analiz yapabilirsiniz:
+
+```sql
+DECLARE
+  l_tuning_task VARCHAR2(30);
+BEGIN
+  l_tuning_task := DBMS_SQLTUNE.CREATE_TUNING_TASK(
+    begin_snap  => 12450,
+    end_snap    => 12455,
+    sql_id      => '5xqm3n6t5k8b2',
+    task_name   => 'awr_tune_task',
+    scope       => DBMS_SQLTUNE.SCOPE_COMPREHENSIVE
+  );
+  
+  DBMS_SQLTUNE.EXECUTE_TUNING_TASK(task_name => 'awr_tune_task');
+END;
+/
+```
+
+---
+
+## Sonuçları Raporlama ve Analiz
+
+Görevi tamamlandıktan sonra (status = 'COMPLETED') raporu çekebilirsiniz:
+
+```sql
+-- Status kontrolü
+SELECT status FROM dba_advisor_tasks WHERE task_name = 'tune_orders_sql';
+
+-- Raporu al
+SET LONG 1000000
+SET LONGCHUNKSIZE 1000
+SET PAGESIZE 0
+SET LINESIZE 200
+SELECT DBMS_SQLTUNE.REPORT_TUNING_TASK('tune_orders_sql') FROM DUAL;
+```
+
+<Callout type="info" title="Raporu Okuma">
+Rapor size "Öneri" kısmında doğrudan uygulanabilir SQL kodlarını verir. Örneğin bir SQL Profil kabul etmeniz gerekiyorsa, raporun sonunda `DBMS_SQLTUNE.ACCEPT_SQL_PROFILE` komutunu görebilirsiniz.
+</Callout>
+
+---
+
+## SQL Tuning Set (STS) Kullanımı
+
+Birden fazla SQL'i toplu olarak analiz etmek veya bir veritabanından diğerine taşımak için **SQL Tuning Set** kullanılır.
+
+### STS Oluşturma ve SQL Ekleme
+```sql
+-- 1. Taslağı oluştur
+EXEC DBMS_SQLTUNE.CREATE_SQLSET('top_cpu_sql_set', 'En çok CPU tüketen 10 SQL');
+
+-- 2. Cursor cache'ten (bellekten) SQL'leri yükle
+DECLARE
+  l_cursor DBMS_SQLTUNE.SQLSET_CURSOR;
+BEGIN
+  OPEN l_cursor FOR
+    SELECT VALUE(p)
+    FROM TABLE(DBMS_SQLTUNE.SELECT_CURSOR_CACHE('elapsed_time > 10000000')) p;
+    
+  DBMS_SQLTUNE.LOAD_SQLSET('top_cpu_sql_set', l_cursor);
+  CLOSE l_cursor;
+END;
+/
+```
+
+---
+
+## Önerilen Çözümleri Uygulama
+
+Tuning Advisor'ın en tatlı meyvelerinden biri **SQL Profile** kabul etmektir. Uygulama koduna dokunmadan sorguyu hızlandırır.
+
+```sql
+-- Tuning Advisor'ın önerdiği profili kabul edin
+EXEC DBMS_SQLTUNE.ACCEPT_SQL_PROFILE(
+  task_name => 'tune_orders_sql',
+  name      => 'PROFILE_orders_5xqm',
+  replace   => TRUE
+);
+```
+
+---
+
+## Best Practices ve Dikkat Edilmesi Gerekenler
+
+- **SCOPE_COMPREHENSIVE:** Büyük sorgular için her zaman kapsamlı analiz (comprehensive) tercih edin, bu modda Advisor query rewrite ve index analizi yapar.
+- **Downtime Gerektirmez:** Tuning Advisor sorguları online analiz eder, sistemi durdurmaz. Ancak analiz sırasında kendisi de bir miktar kaynak tüketir.
+- **SQL Profiling:** Profil kabul etmeden önce mutlaka `COMPARE_PLANS` ile eski ve yeni planı karşılaştırın.
+- **Temizlik:** İşiniz bittikten sonra task'ları silmeyi unutmayın:
+  ```sql
+  EXEC DBMS_SQLTUNE.DROP_TUNING_TASK('tune_orders_sql');
+  ```
+
+Oracle SQL Tuning Advisor, manuel performans tuning işlemlerini inanılmaz derecede hızlandırır. Karmaşık execution planları içinde boğulmak yerine, veritabanının kendi önerilerine kulak vermek çoğu zaman en hızlı ve güvenli yoldur.

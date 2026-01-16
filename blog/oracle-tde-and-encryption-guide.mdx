@@ -1,0 +1,90 @@
+---
+title: "Oracle Veri Şifreleme: Transparent Data Encryption (TDE) ve Wallet Yönetimi"
+description: "Oracle veritabanında disk seviyesinde veri şifreleme (TDE), cüzdan (Wallet) yapılandırması ve hassas kolonların güvenliği."
+date: "2026-01-16"
+category: "Güvenlik"
+tags: ["Oracle", "TDE", "Encryption", "Wallet", "Security", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veri Şifreleme: Transparent Data Encryption (TDE)
+
+Veritabanı güvenliği dendiğinde akla gelen en üst düzey koruma yöntemlerinden biri **Transparent Data Encryption (TDE)**'dır. TDE, verileri disk seviyesinde (at-rest) şifreleyerek, veri dosyalarının (datafiles) veya yedeklerin yetkisiz kişilerce ele geçirilmesi durumunda verilerin okunmasını engeller. "Transparent" (şeffaf) olmasının sebebi, uygulama katmanında hiçbir değişiklik gerektirmemesidir.
+
+
+<!--truncate-->
+Bu makalede, TDE'nin nasıl yapılandırılacağını ve cüzdan (Wallet) yönetimini inceleyeceğiz.
+
+## 1. Oracle Wallet (Cüzdan) Yapılandırması
+
+TDE'nin çalışabilmesi için şifreleme anahtarlarının (Master Key) saklanacağı güvenli bir alana ihtiyaç vardır. Bu alana **Oracle Wallet** denir.
+
+### sqlnet.ora Yapılandırması
+Öncelikle cüzdanın diskte nerede duracağını `sqlnet.ora` dosyasında belirtmelisiniz:
+
+```text
+ENCRYPTION_WALLET_LOCATION =
+  (SOURCE =
+    (METHOD = FILE)
+    (METHOD_DATA =
+      (DIRECTORY = /u01/app/oracle/admin/orcl/wallet)
+    )
+  )
+```
+
+---
+
+## 2. Master Key Oluşturma ve Cüzdanı Açma
+
+Cüzdan oluşturulduktan sonra bir ana şifre ile başlatılması gerekir.
+
+```sql
+-- 11g ve öncesi: Wallet oluşturma ve Master Key set etme
+ALTER SYSTEM SET ENCRYPTION KEY IDENTIFIED BY "password123";
+
+-- 12c ve sonrası (Keystore yönetimi):
+ADMINISTER KEY MANAGEMENT CREATE KEYSTORE '/u01/app/oracle/admin/orcl/wallet' IDENTIFIED BY "password123";
+ADMINISTER KEY MANAGEMENT SET KEYSTORE OPEN IDENTIFIED BY "password123";
+ADMINISTER KEY MANAGEMENT SET KEY IDENTIFIED BY "password123" WITH BACKUP;
+```
+
+---
+
+## 3. Kolon ve Tablespace Şifreleme
+
+Cüzdan aktif hale geldikten sonra, istediğiniz tablo kolonlarını veya tüm bir tablespace'i şifreleyebilirsiniz.
+
+### Kolon Şifreleme
+```sql
+ALTER TABLE MUSTERI_BILGILERI 
+MODIFY (TC_KIMLIK_NO ENCRYPT USING 'AES256');
+```
+
+### Tablespace Şifreleme (Tavsiye Edilen)
+Tüm bir tablespace'i şifrelemek, yönetim kolaylığı ve performans açısından genellikle daha iyi bir tercihtir:
+
+```sql
+CREATE TABLESPACE guvenli_data 
+DATAFILE '/u01/oradata/orcl/guvenli01.dbf' SIZE 100M 
+ENCRYPTION USING 'AES256' DEFAULT STORAGE (ENCRYPT);
+```
+
+---
+
+## 4. Cüzdan Durumunu Kontrol Etme
+
+Cüzdanın açık olup olmadığını şu sorgu ile kontrol edebilirsiniz:
+
+```sql
+SELECT * FROM v$encryption_wallet;
+-- 12c sonrası için:
+SELECT * FROM v$encryption_keys;
+```
+
+## Özet ve Güvenlik İpuçları
+
+-   **Wallet Yedeği:** Cüzdan dosyanızı (`ewallet.p12`) kaybederseniz ve yedeğiniz yoksa, şifreli verilerinize **asla** erişemezsiniz. Bu dosyayı veritabanından ayrı, çok güvenli bir yerde yedekleyin.
+-   **Autologin Wallet:** Veritabanı her açıldığında cüzdanın otomatik açılması için "Auto-Login" özelliğini aktif edebilirsiniz. Bu, operasyonel kolaylık sağlar ancak güvenliği bir miktar azaltır.
+-   **Performans:** TDE'nin performans üzerindeki etkisi modern işlemcilerdeki donanım hızlandırma (AES-NI) sayesinde genellikle %1-2 civarındadır.
+
+TDE, özellikle finansal veri ve kişisel veri saklayan sistemler için vazgeçilmez bir güvenlik katmanıdır. Doğru yapılandırıldığında, veritabanınızı fiziksel hırsızlıklara karşı tam korumalı hale getirir.

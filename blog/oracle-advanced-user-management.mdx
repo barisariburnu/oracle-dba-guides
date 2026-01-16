@@ -1,0 +1,81 @@
+---
+title: "Oracle Kullanıcı Yönetimi: Şifre Kurtarma ve Gelişmiş Yetkilendirme"
+description: "Oracle veritabanında süresi dolmuş (expired) şifreleri orijinal metni bilmeden kurtarma, kota yönetimi ve toplu yetkilendirme scriptleri."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "User Management", "Password Recovery", "Grant", "Quota", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Kullanıcı Yönetimi ve Şifre Kurtarma Teknikleri
+
+Veritabanı yöneticilerinin en sık yaptığı işlemlerden biri kullanıcı oluşturmak ve yetki vermektir. Ancak bazen bir kullanıcının şifresinin süresi dolar ve kullanıcı şifresini hatırlamaz, ya da şifreyi bilmeden hesabın kilidini açmanız veya süresini uzatmanız gerekir. Bu makalede, bu tür "hayat kurtaran" DBA tekniklerini inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Şifreyi Bilmeden Expired Hesabı Kurtarma
+
+Oracle'da şifreyi değiştirmeden (veya bilmediğiniz aynı şifre ile) süresini uzatmak için şifre özetini (hash) kullanabilirsiniz.
+
+### Adımlar:
+1.  **Şifre Hash Değerini Bulun:**
+```sql
+SELECT spare4 FROM sys.user$ WHERE name = 'KULLANICI_ADI';
+-- Veya daha eski sürümler için:
+SELECT password FROM sys.user$ WHERE name = 'KULLANICI_ADI';
+```
+
+2.  **Aynı Değerle Güncelleyin:**
+```sql
+ALTER USER KULLANICI_ADI IDENTIFIED BY "password123";
+```
+Bu işlem, şifre metnini bilmenize gerek kalmadan şifreyi "yeniden set eder" ve `EXPIRED` durumunu ortadan kaldırır.
+
+---
+
+## 2. Kullanıcı Kota (Quota) Yönetimi
+
+Bir kullanıcıya belirli bir tablespace üzerinde ne kadar yer kullanabileceğini sınırlamak veya sınırsız yetki vermek için kullanılır.
+
+```sql
+-- Kullanıcıya 500 MB kota verme
+ALTER USER meryem QUOTA 500M ON USERS;
+
+-- Sınırsız kota verme (Tavsiye edilen yöntem yetki vermektir)
+GRANT UNLIMITED TABLESPACE TO meryem;
+```
+
+---
+
+## 3. Toplu Yetkilendirme (Dynamic SQL)
+
+Bir şemadaki tüm tablolar için başka bir kullanıcıya toplu `SELECT` yetkisi vermek için dinamik SQL oluşturabilirsiniz.
+
+```sql
+SELECT 'GRANT SELECT ON ' || owner || '.' || table_name || ' TO RAPOR_USER;'
+FROM dba_tables
+WHERE owner = 'HR_SCHEMA';
+```
+Çıkan sonuçları kopyalayıp çalıştırarak binlerce tabloya saniyeler içinde yetki verebilirsiniz.
+
+---
+
+## 4. Uygulama Kullanıcıları İçin Güvenli Şablon
+
+Kurumsal uygulamalar için kullanıcı oluştururken şu şablonu takip edebilirsiniz:
+
+```sql
+CREATE USER APP_USER 
+IDENTIFIED BY "password123"
+DEFAULT TABLESPACE APPDATA
+TEMPORARY TABLESPACE TEMP
+PROFILE APP_PROFILE
+ACCOUNT UNLOCK;
+
+GRANT CONNECT, RESOURCE TO APP_USER;
+GRANT CREATE VIEW, CREATE SYNONYM TO APP_USER;
+```
+
+## Özet
+
+Kullanıcı yönetimi, veritabanı güvenliğinin ilk basamağıdır. Şifre hash'i ile işlem yapmak gibi ileri seviye teknikler, operasyonel kesintileri minimuma indirirken; kota ve profil yönetimi sistem kaynaklarının adil dağılımını sağlar.

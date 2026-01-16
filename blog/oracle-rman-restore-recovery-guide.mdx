@@ -1,0 +1,84 @@
+---
+title: "Oracle RMAN Restore ve Recovery Senaryoları (Disaster Recovery)"
+description: "Veritabanı çökmesi durumunda uygulanan kritik kurtarma senaryoları: Controlfile kaybı, Datafile eksikliği ve Point-in-Time Recovery (PITR) işlemleri."
+date: 2026-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "restore", "recovery", "disaster recovery", "pitr", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN Restore ve Recovery Senaryoları
+
+Bir veritabanı yöneticisinin en stresli anı, veritabanının açılmadığı ve "Recovery" gerektiği andır. Bu makalede, gerçek hayat senaryoları üzerinden RMAN kullanarak veritabanınızı nasıl ayağa kaldıracağınızı inceleyeceğiz.
+
+
+<!--truncate-->
+## Senaryo 1: Tüm Controlfile Dosyalarının Kaybı
+
+Controlfile, veritabanının beynidir. Eğer tüm kopyaları kaybederseniz veritabanı `MOUNT` bile olamaz.
+
+### Çözüm Adımları:
+1. **NOMOUNT:** Veritabanını `startup nomount` ile başlatın.
+2. **Restore Controlfile:** RMAN üzerinden autobackup'tan kurtarın.
+   ```rman
+   RESTORE CONTROLFILE FROM AUTOBACKUP;
+   ```
+3. **Mount & Recover:**
+   ```rman
+   ALTER DATABASE MOUNT;
+   RECOVER DATABASE;
+   ALTER DATABASE OPEN RESETLOGS;
+   ```
+
+## Senaryo 2: Eksik Datafile (Database Open Olamıyor)
+
+Eğer bir datafile silinmişse, Oracle `OPEN` aşamasında hata verir.
+
+### Çözüm Adımları:
+```rman
+-- RMAN'e bağlanın
+RESTORE DATAFILE 5; -- Hata veren dosya numarası
+RECOVER DATAFILE 5;
+ALTER DATABASE OPEN;
+```
+
+<Callout type="info" title="Online Recovery">
+Eğer veritabanı açıksa ve sistem dışı bir datafile (örneğin USERS) zarar görmüşse, veritabanını kapatmadan sadece o dosyayı offline yapıp kurtarabilirsiniz.
+</Callout>
+
+## Senaryo 3: Point-in-Time Recovery (PITR)
+
+"Dün gece 22:00'de yanlışlıkla bir tabloyu sildim" veya "Hatalı bir update tüm veriyi bozdu" durumlarında veritabanını belirli bir zamana geri döndürmek gerekebilir.
+
+### Çözüm Adımları:
+```rman
+RUN {
+  SET UNTIL TIME "TO_DATE('15-01-2026 21:55:00', 'DD-MM-YYYY HH24:MI:SS')";
+  RESTORE DATABASE;
+  RECOVER DATABASE;
+  ALTER DATABASE OPEN RESETLOGS;
+}
+```
+
+<Callout type="warning" title="RESETLOGS Sonrası">
+`OPEN RESETLOGS` komutu ile veritabanı açıldığında, eski incarnation geçersiz olur. Hemen yeni bir FULL BACKUP almanız şiddetle önerilir.
+</Callout>
+
+## Senaryo 4: Block Corruption (Blok Bozulması)
+
+Tüm veritabanını restore etmek yerine, sadece bozulan tek bir bloğu onarmak mümkündür.
+
+### Çözüm Adımları:
+```rman
+-- Önce bozulan bloğu tespit edin (V$DATABASE_BLOCK_CORRUPTION)
+BLOCKRECOVER DATAFILE 7 BLOCK 123, 124, 125;
+```
+
+## Kurtarma Sırasında Sık Karşılaşılan Hatalar
+
+- **Missing Archived Log:** Eğer recovery sırasında gerekli bir arşiv log eksikse, o noktaya kadar recovery yapılır. Veri kaybı oluşabilir.
+- **Wrong Catalog:** Eğer katalog veritabanı güncel değilse (resync edilmemişse), RMAN en güncel yedekleri göremeyebilir.
+
+## Sonuç
+
+Felaket anında doğru kararı vermek için bu senaryoları "Test" ortamlarınızda defalarca prova edin. RMAN'in sunduğu `RESTORE PREVIEW` komutunu kullanarak, hangi yedeklerin kullanılacağını önceden görmek hata payınızı minimize eder.

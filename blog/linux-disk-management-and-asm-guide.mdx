@@ -1,0 +1,97 @@
+---
+title: "Linux Sistem Yönetimi: Disk Ekleme, Mount ve ASM Hazırlığı"
+description: "Linux sunucularında yeni disk ekleme, dosya sistemi (ext3/ext4) oluşturma, fstab kaydı ve ASM disklerini raw device olarak yapılandırma rehberi."
+date: "2026-01-16"
+category: "Linux"
+tags: ["Linux Administration", "Disk Management", "ASM Preparation", "FSTAB", "Mount Point", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Linux Sistem Yönetimi: Disk Ekleme ve ASM Hazırlığı
+
+Oracle veritabanı sunucularında disk yönetimi, hem veritabanı dosyaları (Datafiles) hem de yedekleme alanları için en sık yapılan işlemlerden biridir. Yeni bir disk eklendiğinde bunu işletim sistemine tanıtmak, dosya sistemi oluşturup kalıcı olarak mount etmek veya doğrudan ASM'e (Automatic Storage Management) vermek için raw device olarak hazırlamak gerekir. Bu makalede, bir Linux DBA'nın bilmesi gereken temel disk operasyonlarını adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Yeni Diski Tanıma ve Formatlama
+
+Yeni bir disk (LUN) sunucuya atandığında, `lsblk` veya `fdisk -l` komutu ile cihaz adını (örn: `/dev/sdc`) bulmalısınız.
+
+### Dosya Sistemi Oluşturma (Partitioning)
+Eğer diski standart bir dizin olarak kullanacaksanız (örn: `/oracle` veya `/backup`):
+
+```bash
+# ext4 dosya sistemi oluştur
+mkfs -t ext4 /dev/sdc
+
+# Mount noktası (dizin) oluştur
+mkdir /u02
+
+# Manuel mount etme
+mount /dev/sdc /u02
+```
+
+---
+
+## 2. Kalıcı Mount İşlemi (fstab)
+
+Sunucu her açıldığında diskin otomatik mount edilmesi için `/etc/fstab` dosyasına kayıt girilmelidir.
+
+```bash
+# fstab dosyasına ekleme örneği
+# <Cihaz>      <Mount Noktası>   <Dosya Sistemi>  <Seçenekler>  <Dump/Pass>
+/dev/sdc       /u02              ext4             defaults      1 2
+```
+
+---
+
+## 3. ASM İçin Disk Hazırlığı (Raw/Multipath)
+
+ASM kullanılacaksa diski formatlamamalısınız. Ancak diskin sahipliğini ve izinlerini Oracle kullanıcısına göre ayarlamanız gerekir.
+
+### A. Manuel İzin Ayarlama
+```bash
+# Diski temizle (Varsa eski başlık bilgisini sil)
+dd if=/dev/zero of=/dev/sdc bs=1024 count=1000
+
+# Sahiplik ve yetki ayarları
+chown oracle:dba /dev/sdc
+chmod 660 /dev/sdc
+```
+
+### B. ASMLib Kullanımı (Önerilen)
+Oracle ASMLib yüklü ise diski şu şekilde etiketleyebilirsiniz:
+
+```bash
+oracleasm createdisk DATA_DISK_01 /dev/sdc
+oracleasm scandisks
+oracleasm listdisks
+```
+
+---
+
+## 4. Dosya Sistemini Genişletme (LVM Yoksa)
+
+Eğer LVM kullanılmıyorsa ve fiziksel disk/partition genişletildiyse (`fdisk` üzerinden partition silinip daha büyük boyutta tekrar oluşturulduysa), veri kaybı olmadan dosya sistemini şu şekilde genişletebilirsiniz:
+
+```bash
+# 1. Bölümü ayır
+umount /u01
+
+# 2. Dosya sistemini kontrol et
+e2fsck -f /dev/sda1
+
+# 3. Dosya sistemini fiziksel boyuta kadar büyüt
+resize2fs /dev/sda1
+
+# 4. Tekrar bağla
+mount /dev/sda1 /u01
+```
+
+## Özet ve Güvenlik Notları
+
+-   **fstab Hatası:** fstab dosyasına yanlış bir kayıt girerseniz sunucu açılmayabilir (Maintenance Mode). Değişiklik sonrası mutlaka `mount -a` komutu ile hatasız olduğunu test edin.
+-   **Device Names:** `/dev/sdc` gibi statik isimler yeniden başlatma sonrası değişebilir. fstab'da `UUID` kullanmak her zaman daha güvenlidir (`blkid` komutu ile UUID'leri görebilirsiniz).
+-   **Veri Kaybı:** `mkfs` komutu diski tamamen sıfırlar. Yanlış diskte çalışmadığınızdan emin olun!
+
+Disk yönetimi veritabanı performansının temelidir. Doğru yapılandırılmış bir depolama katmanı, DBA'nın yükünü hafifletir ve sistemin uzun süre sorunsuz çalışmasını sağlar.

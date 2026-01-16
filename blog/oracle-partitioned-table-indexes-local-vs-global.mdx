@@ -1,0 +1,87 @@
+---
+title: "Oracle Partitioned Tables: Local ve Global Index Stratejileri"
+description: "Oracle veritabanında büyük tablolar için partitioning kullanımı, Local ve Global index farkları, partition maintenance işlemleri ve performans optimizasyonu."
+date: "2026-01-16"
+category: "Index"
+tags: ["Oracle Partitioning", "Local Index", "Global Index", "Database Design", "VLDB", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Partitioned Tables: Local ve Global Index Rehberi
+
+Çok büyük veritabanlarında (VLDB), milyarlarca satırlık tabloları yönetmek için **Partitioning (Bölümleme)** vazgeçilmezdir. Ancak bir tabloyu bölmek yetmez; o tablonun üzerindeki indexlerin de nasıl bölümleneceğine karar vermek gerekir. Yanlış index stratejisi, partition maintenance (bakım) işlemleri sırasında tüm indexlerin `UNUSABLE` (geçersiz) hale gelmesine ve sistemin durmasına neden olabilir. Bu makalede, **Local** ve **Global** index farklarını ve uygulama örneklerini inceleyeceğiz.
+
+
+<!--truncate-->
+## Local Index Nedir?
+
+Local index, tablonun ana bölümleriyle (partitions) birebir eşleşen index türüdür. Tablonun 12 aylık 12 partition'ı varsa, local indexin de 12 partition'ı olur.
+
+**Avantajları:**
+-   **Yönetim Kolaylığı:** Bir partition silindiğinde (DROP) veya taşındığında (MOVE), sadece o partition'ın indexi etkilenir. Diğerleri sağlam kalır.
+-   **Partition Partitioning:** Oracle, sadece ilgili partition'ın indexine bakarak sorguyu hızlandırabilir.
+-   **Erişilebilirlik:** Bakım sırasında tablo kullanım dışı kalmaz.
+
+```sql
+-- Local Index Oluşturma Örneği
+CREATE INDEX sales_idx ON sales (sales_date)
+LOCAL (
+  PARTITION p_2023_01,
+  PARTITION p_2023_02,
+  PARTITION p_2023_03
+);
+```
+
+---
+
+## Global Index Nedir?
+
+Global index, tablonun bölümlerinden bağımsız, tek bir büyük index yapısıdır (veya tablodan farklı bir anahtar üzerinde bölünmüş olabilir).
+
+**Avantajları:**
+-   **Sorgu Performansı:** Eğer sorgu tablonun bölme kriteri (partition key) dışındaki bir kolonla arama yapıyorsa, global index çok daha hızlı sonuç döner.
+
+**Dezavantajları:**
+-   **Bakım Zorluğu:** Tablodan bir partition silindiğinde, global index tamamen bozulur (Unusable) ve rebuild edilmesi gerekir. (Ancak `UPDATE GLOBAL INDEXES` clause'u ile bu risk azaltılabilir).
+
+```sql
+-- Global Index Oluşturma Örneği
+CREATE INDEX customers_idx ON sales (customer_id) GLOBAL;
+```
+
+---
+
+## Hangisini Seçmelisiniz?
+
+| Özellik | Local Index | Global Index |
+| :--- | :--- | :--- |
+| **Maintenance** | Çok kolay. | Zor ve riskli. |
+| **Availability** | Yüksek. | Bakım sırasında riskli. |
+| **Sorgu Hızı** | Partition key kullanılıyorsa iyi. | Genel sorgularda daha iyi. |
+| **OLTP/DWH** | Data Warehouse için ideal. | OLTP sistemlerde gerekebilir. |
+
+---
+
+## Pratik Uygulama: Local Index Scripti
+
+Çok sayıda partition içeren bir tabloda local index oluştururken, her bir partition'ın özelliklerini (tablespace, storage vb.) tek tek belirtebilirsiniz:
+
+```sql
+CREATE INDEX inx_data_slice ON data_slice (time_stamp)
+TABLESPACE data_idx_ts
+LOCAL (  
+  PARTITION p_2024_01 TABLESPACE ts_idx_01,
+  PARTITION p_2024_02 TABLESPACE ts_idx_02,
+  PARTITION p_2024_03 TABLESPACE ts_idx_03
+)
+NOLOGGING;
+```
+
+## Özet ve En İyi Uygulamalar
+
+1.  **Önce Local:** Aksi ispatlanmadıkça büyük partitioned tablolar için her zaman `LOCAL` index tercih edin.
+2.  **Unusable Durumu:** Bir partition drop ettiğinizde global indexlerin durumunu mutlaka kontrol edin:
+    `SELECT index_name, status FROM dba_indexes WHERE status = 'UNUSABLE';`
+3.  **Prefix vs Non-Prefix:** Eğer index partition key ile başlıyorsa "Prefixed", başlamıyorsa "Non-Prefixed" denir. Prefixed local indexler sorgu budama (pruning) için en verilmli olanlardır.
+
+Index stratejinizi tablonun nasıl büyüdüğüne ve nasıl sorgulandığına göre belirleyerek, hem performansı hem de sistem yönetilebilirliğini maksimum seviyeye çıkarabilirsiniz.

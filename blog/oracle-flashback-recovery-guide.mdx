@@ -1,0 +1,98 @@
+---
+title: "Oracle Flashback Teknolojileri: Veri Kurtarma ve Zaman Yolculuğu"
+description: "Oracle veritabanında yanlışlıkla silinen tabloları (Recycle Bin), truncate edilen verileri veya tüm veritabanını belirli bir geçmiş zamana döndürme rehberi."
+date: "2026-01-16"
+category: "Kurtarma"
+tags: ["Oracle Flashback", "Data Recovery", "Recycle Bin", "Restore Point", "Flashback Database", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Flashback Teknolojileri: Veri Kurtarma ve Zaman Yolculuğu
+
+Hata yapmak insana mahsustur; ancak veritabanı dünyasında "yanlış tabloyu sildim" veya "WHERE clause eklemeyi unutup tüm tabloyu güncelledim" demek kabusunuz olabilir. Geleneksel yöntemlerle (Yedekten dönme) bu hatayı düzeltmek saatler sürebilir. Oracle **Flashback Teknolojileri**, veritabanını veya nesneleri yedekten dönmeye gerek kalmadan, saniyeler içinde geçmişteki bir ana (SCN veya Zaman) döndürmenize olanak tanır. Bu makalede en popüler Flashback yöntemlerini uygulamalı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Flashback Drop (Recycle Bin Kullanımı)
+
+Oracle'da bir tabloyu sildiğinizde (`DROP TABLE`), o tablo fiziksel olarak hemen silinmez; bunun yerine **Recycle Bin** (Geri Dönüşüm Kutusu) alanına taşınır.
+
+### Tabloyu Kurtarma
+```sql
+-- Silinen tabloyu geri getir
+FLASHBACK TABLE msdeveci.test TO BEFORE DROP;
+
+-- Recycle Bin içeriğini görme
+SELECT object_name, original_name, droptime FROM dba_recyclebin;
+```
+<Callout type="warning">
+`DROP TABLE ... PURGE` komutu kullanılırsa tablo recycle bin'e gitmeden kalıcı olarak silinir.
+</Callout>
+
+---
+
+## 2. Flashback Database (Tüm Veritabanını Geri Sarma)
+
+Büyük bir yazılım dağıtımı (deployment) öncesi veya ciddi bir insan hatasında tüm veritabanını geçmişe döndürmek gerekebilir.
+
+### Hazırlık: Flashback'i Açma
+```sql
+ALTER DATABASE FLASHBACK ON;
+```
+
+### Geri Dönme Adımları
+```sql
+-- 1. Veritabanını kapat ve mount modda aç
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+
+-- 2. Belirli bir SCN numarasına veya zamana geri dön
+FLASHBACK DATABASE TO SCN 3524756;
+-- Veya zamana göre:
+-- FLASHBACK DATABASE TO TIMESTAMP TO_TIMESTAMP('2024-01-16 10:00:00','YYYY-MM-DD HH24:MI:SS');
+
+-- 3. Veritabanını salt okunur açıp kontrol et
+ALTER DATABASE OPEN READ ONLY;
+
+-- 4. Her şey yolundaysa resetlogs ile kalıcı hale getir
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+ALTER DATABASE OPEN RESETLOGS;
+```
+
+---
+
+## 3. Restore Point (Geri Dönüş Noktası)
+
+Restore Point, veritabanı için bir "Checkpoint" oluşturmaktır. Özellikle riskli operasyonlar öncesi hayat kurtarır.
+
+### Restore Point Oluşturma
+```sql
+-- Garantili (Guaranteed) restore point
+CREATE RESTORE POINT onc_bakim_noktasi GUARANTEE FLASHBACK DATABASE;
+```
+
+### Restore Point'e Dönüş
+```sql
+FLASHBACK DATABASE TO RESTORE POINT onc_bakim_noktasi;
+```
+
+---
+
+## 4. Flashback Query (Satır Bazlı Kurtarma)
+
+Eğer sadece birkaç satırı yanlışlıkla sildiyseniz, tablonun 15 dakika önceki halini sorgulayıp verileri geri çekebilirsiniz:
+
+```sql
+-- Tablonun 15 dakika önceki halini sorgula
+SELECT * FROM siparisler AS OF TIMESTAMP (SYSTIMESTAMP - INTERVAL '15' MINUTE)
+WHERE musteri_id = 101;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Alan Yönetimi:** Flashback verileri `FRA` (Flash Recovery Area) içinde tutulur. Bu alanın dolması veritabanının durmasına neden olabilir, bu yüzden FRA boyutu iyi ayarlanmalıdır.
+-   **Garantili Restore Point:** `GUARANTEE` parametresi ile oluşturulan restore pointler, veritabanı flashback kapalı olsa bile undo/redo verilerini saklar. İşiniz bittiğinde mutlaka DROP edin.
+-   **Undo Retention:** Flashback query'nin ne kadar geriye gidebileceği `UNDO_RETENTION` parametresine bağlıdır.
+
+Flashback, modern bir DBA'nın en güçlü zırhıdır. Bu araçları doğru kullanarak kriz anlarını "mucizevi kurtarışlara" dönüştürebilirsiniz.

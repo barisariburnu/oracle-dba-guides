@@ -1,0 +1,96 @@
+---
+title: "Kendi İzleme Aracınızı Oluşturun: Oracle İstatistik ve Boyut Takip Tool'u"
+description: "Oracle veritabanında tarihsel boyut ve oturum istatistiklerini takip etmek için özel tablolar, sequence'lar ve zamanlanmış işler (Jobs) ile bir izleme aracı oluşturma."
+date: "2026-01-16"
+category: "Geliştirme"
+tags: ["Oracle", "Monitoring", "Custom Tool", "PL/SQL", "Automation", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Kendi İzleme Aracınızı Oluşturun: Oracle İstatistik Tool'u
+
+Oracle veritabanında anlık durumu görmek (`v$session`, `dba_segments`) kolaydır. Ancak "Geçen ay bu tablonun boyutu neydi?" veya "Dün öğlen saatlerinde kaç aktif oturum vardı?" gibi sorulara yanıt bulmak için tarihsel veri saklayan bir mekanizmaya ihtiyacınız vardır. Her ne kadar AWR bu bilgileri tutsa da, kendi özel tablolarınızla daha esnek ve uzun süreli raporlar alabilirsiniz.
+
+
+<!--truncate-->
+Bu makalede, PL/SQL kullanarak basit bir istatistik takip aracı oluşturmayı öğreneceğiz.
+
+## 1. Veri Yapısını Hazırlama
+
+Öncelikle verileri saklayacağımız tabloları ve otomatik artan ID'ler için sequence'ları oluşturuyoruz.
+
+```sql
+-- Segment boyutlarını saklayacağımız tablo
+CREATE TABLE MON_DBA_SEGMENTS (
+  track_id        NUMBER,
+  track_date      DATE,
+  owner           VARCHAR2(30),
+  segment_name    VARCHAR2(128),
+  bytes           NUMBER
+);
+
+-- Otomatik ID için sequence
+CREATE SEQUENCE SEQ_MON_DBA_SEGMENTS START WITH 1 INCREMENT BY 1;
+```
+
+---
+
+## 2. Veri Toplama Prosedürü
+
+Verileri periyodik olarak toplayıp tablomuza insert edecek olan prosedürü yazıyoruz.
+
+```sql
+CREATE OR REPLACE PROCEDURE PRC_COLLECT_DB_STATS AS
+BEGIN
+  -- 1. Segment boyutlarını kaydet
+  INSERT INTO MON_DBA_SEGMENTS (track_id, track_date, owner, segment_name, bytes)
+  SELECT SEQ_MON_DBA_SEGMENTS.NEXTVAL, SYSDATE, owner, segment_name, bytes
+  FROM dba_segments
+  WHERE bytes > 100 * 1024 * 1024; -- Sadece 100MB'dan büyükleri takip et
+  
+  COMMIT;
+END;
+/
+```
+
+---
+
+## 3. Otomasyon (DBMS_SCHEDULER)
+
+Bu prosedürün her gece veya her saat başı otomatik çalışması için bir Job oluşturuyoruz.
+
+```sql
+BEGIN
+  DBMS_SCHEDULER.CREATE_JOB (
+    job_name        => 'JOB_DATABASE_STATS_COLLECTOR',
+    job_type        => 'STORED_PROCEDURE',
+    job_action      => 'PRC_COLLECT_DB_STATS',
+    start_date      => SYSTIMESTAMP,
+    repeat_interval => 'FREQ=DAILY; BYHOUR=1', -- Her gün saat 01:00'de
+    enabled         => TRUE
+  );
+END;
+/
+```
+
+---
+
+## 4. Analiz Sorguları
+
+Veriler biriktikten sonra değişim analizlerini kolayca yapabilirsiniz:
+
+```sql
+-- Bir tablonun son 30 günlük büyüme grafiği verisi
+SELECT track_date, bytes/1024/1024 as size_mb
+FROM MON_DBA_SEGMENTS
+WHERE segment_name = 'SIPARIS_DETAY'
+ORDER BY track_date;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Alan Yönetimi:** Toplama tablolarınızın kendisinin diski doldurmasını engellemek için periyodik temizleme (Cleanup) adımları ekleyin (Örn: 1 yıldan eski verileri sil).
+-   **Kritik Objeler:** Tüm veritabanını değil, sadece sizin için kritik olan (en hızlı büyüyen veya en yoğun kullanılan) tabloları izleyin.
+-   **Görselleştirme:** Bu tabloları Excel, PowerBI veya basit bir APEX uygulaması ile görselleştirerek etkileyici raporlar oluşturabilirsiniz.
+
+Kendi izleme aracınızı oluşturmak, veritabanınızın karakterini öğrenmenizi ve kapasite sorunlarını aylar öncesinden öngörmenizi sağlar.

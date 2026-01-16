@@ -1,0 +1,429 @@
+---
+title: "Oracle ASM Disk Management - Temel Bilgiler ve Best Practices"
+description: "Oracle ASM diskgroup oluşturma, disk ekleme, disk silme, rebalancing ve monitoring işlemleri ile kapsamlı ASM yönetim rehberi."
+date: 2025-01-16
+category: "Oracle ASM"
+tags: ["oracle", "asm", "storage", "diskgroup", "rebalance", "monitoring"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle ASM Disk Management - Temel Bilgiler ve Best Practices
+
+Oracle Automatic Storage Management (ASM), Oracle veritabanları için tasarlanmış bir clustered file system ve volume manager'dir. Bu makalede, ASM disk yönetiminin temellerini, diskgroup işlemlerini ve production best practice'lerini inceleyeceğiz.
+
+
+<!--truncate-->
+## ASM Diskgroup Oluşturma
+
+### Yeni Diskgroup Oluşturma
+
+```sql
+-- Normal redundancy (2-way mirror)
+CREATE DISKGROUP data NORMAL REDUNDANCY
+  DISK '/dev/raw/raw1' NAME data1,
+       '/dev/raw/raw2' NAME data2
+  ATTRIBUTE 'au_size'='4M',
+           'compatible.asm'='11.2',
+           'compatible.rdbms'='11.2';
+
+-- External redundancy (RAID protected disks)
+CREATE DISKGROUP fra EXTERNAL REDUNDANCY
+  DISK '/dev/oracleasm/disks/FRA1' NAME fra1,
+       '/dev/oracleasm/disks/FRA2' NAME fra2,
+       '/dev/oracleasm/disks/FRA3' NAME fra3
+  ATTRIBUTE 'au_size'='1M',
+           'compatible.asm'='11.2';
+```
+
+<Callout type="info" title="AU_SIZE Seçimi">
+Allocation Unit (AU) size seçimi performansı etkiler:
+- **1M**: Küçük file'lar için uygun (FRA, audit logs)
+- **4M**: Database data file'lar için standart
+- **16M**: Data warehouse, büyük sequential read işlemleri için
+</Callout>
+
+## Diskgroup'a Disk Ekleme
+
+### Tek Disk Ekleme
+
+```sql
+ALTER DISKGROUP data ADD DISK '/dev/raw/raw3' NAME data3;
+```
+
+### Birden Fazla Disk Ekleme
+
+```sql
+ALTER DISKGROUP data ADD DISK
+  '/dev/raw/raw4' NAME data4,
+  '/dev/raw/raw5' NAME data5,
+  '/dev/raw/raw6' NAME data6;
+```
+
+### Rebalance Power Belirleme
+
+```sql
+-- Rebalance hızını ayarla (1-11 arası, 11 en hızlı)
+ALTER DISKGROUP data REBALANCE POWER 8;
+
+-- Mevcut rebalance durumunu kontrol et
+SELECT group_number,
+       operation,
+       state,
+       power,
+       est_minutes
+FROM v$asm_operation;
+```
+
+<Callout type="warning" title="Performans Uyarısı">
+Yüksek rebalance power (8-11) disk I/O yükünü artırır. Production saatlerinde düşük power (2-4) kullanın, maintenance window'da yüksek power kullanın.
+</Callout>
+
+## Diskgroup'tan Disk Silme
+
+### Disk Drop İşlemi
+
+```sql
+-- Tek disk sil
+ALTER DISKGROUP data DROP DISK data3;
+
+-- Birden fazla disk sil
+ALTER DISKGROUP data DROP DISK data4, data5;
+
+-- Diski hemen sil (bekleme yapma)
+ALTER DISKGROUP data DROP DISK data6 FORCE;
+```
+
+### Disk Silme Öncesi Kontrol
+
+```sql
+-- Diskin durumunu kontrol et
+SELECT name,
+       group_number,
+       total_mb,
+       free_mb,
+       state,
+       path
+FROM v$asm_disk
+WHERE name = 'DATA3';
+
+-- Disk üzerindeki data miktarını kontrol et
+SELECT group_number,
+       disk_number,
+       name,
+       total_mb,
+       free_mb,
+       reads,
+       writes
+FROM v$asm_disk
+ORDER BY group_number, disk_number;
+```
+
+## ASM Disk Monitoring
+
+### Diskgroup Durumunu Görüntüleme
+
+```sql
+SELECT group_number,
+       name,
+       sector_size,
+       block_size,
+       allocation_unit_size,
+       state,
+       type,
+       total_mb,
+       free_mb,
+       required_mirror_free_mb,
+       usable_file_mb
+FROM v$asm_diskgroup
+ORDER BY group_number;
+```
+
+### Disk Bazında Detaylı Bilgi
+
+```sql
+SELECT dg.name AS diskgroup,
+       d.name AS disk_name,
+       d.path,
+       d.total_mb,
+       d.free_mb,
+       d.reads,
+       d.writes,
+       d.read_errs,
+       d.write_errs,
+       d.state,
+       d.mount_status
+FROM v$asm_disk d
+JOIN v$asm_diskgroup dg ON d.group_number = dg.group_number
+ORDER BY dg.name, d.name;
+```
+
+### Diskgroup Kullanım Oranları
+
+```sql
+SELECT name AS diskgroup,
+       total_mb,
+       free_mb,
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS used_percent,
+       ROUND(free_mb / total_mb * 100, 2) AS free_percent,
+       required_mirror_free_mb AS mirror_mb,
+       usable_file_mb
+FROM v$asm_diskgroup
+ORDER BY used_percent DESC;
+```
+
+<Callout type="warning" title="Capacity Alert">
+ASM diskgroup'ları için:
+- **%85+ kullanım**: Kritik (CRITICAL) - Acil disk ekleme gerekli
+- **%75-85%**: Uyarı (WARNING) - Planlama başlamalı
+- **Required mirror free_mb**: Bu miktar free olmalı, aksi takdirde mirrorlama başarısız olur
+</Callout>
+
+## Rebalancing İşlemleri
+
+### Rebalance Power Değiştirme
+
+```sql
+-- Anlık rebalance power'ı değiştir
+ALTER DISKGROUP ALL REBALANCE POWER 5 WAIT;
+
+-- Tüm diskgroup'ları rebalance et
+ALTER DISKGROUP data REBALANCE POWER 8;
+```
+
+### Rebalance Progress Monitoring
+
+```sql
+SELECT group_number,
+       operation,
+       state,
+       power,
+       actual,
+       sofar,
+       est_work,
+       est_rate,
+       est_minutes
+FROM v$asm_operation
+ORDER BY group_number;
+```
+
+<Callout type="info" title="Rebalance Performans İpuçları">
+- **Small diskgroup'lar (&lt; 500GB)**: Power 4-6 yeterli
+- **Medium diskgroup'lar (500GB-2TB)**: Power 6-8
+- **Large diskgroup'lar (&gt; 2TB)**: Power 8-11
+- Rebalance süresi ≈ (Toplam Data / Rebalance Rate)
+</Callout>
+
+## ASM Diskgroup Mount/Dismount İşlemleri
+
+### Diskgroup Mount Etme
+
+```sql
+-- Tek diskgroup mount et
+ALTER DISKGROUP data MOUNT;
+
+-- Tüm diskgroup'ları mount et
+ALTER DISKGROUP ALL MOUNT;
+
+-- Restricted modda mount (sadece SYSDBA erişimi)
+ALTER DISKGROUP data MOUNT RESTRICTED;
+```
+
+### Diskgroup Dismount Etme
+
+```sql
+-- Tek diskgroup dismount et
+ALTER DISKGROUP data DISMOUNT;
+
+-- Tüm diskgroup'ları dismount et
+ALTER DISKGROUP ALL DISMOUNT;
+```
+
+## Diskgroup Attribute Management
+
+### Attribute Değiştirme
+
+```sql
+-- Rebalance timeout ayarla
+ALTER DISKGROUP data SET ATTRIBUTE 'rebalance.power' = '8';
+
+-- Disk compatible seviyesini yükselt
+ALTER DISKGROUP data SET ATTRIBUTE 'compatible.rdbms' = '192.168.1.101';
+
+-- AU_SIZE değiştir (diskgroup boş olmalı)
+ALTER DISKGROUP data SET ATTRIBUTE 'au_size' = '4M';
+```
+
+## ASM Template Management
+
+### Template Oluşturma
+
+```sql
+-- Data file template'i
+ALTER DISKGROUP data ADD TEMPLATE data_file
+  ATTRIBUTES (UNPROTECTED COARSE);
+
+-- Mirror template'i
+ALTER DISKGROUP data ADD TEMPLATE mirror_file
+  ATTRIBUTES (FINE MIRROR);
+```
+
+### Template Listesi
+
+```sql
+SELECT group_number,
+       name,
+       status,
+       redundancy,
+       stripe,
+       system
+FROM v$asm_template
+ORDER BY group_number, name;
+```
+
+## Troubleshooting
+
+### Disk Sorunu Giderme
+
+```sql
+-- Hatalı diskleri bul
+SELECT name,
+       group_number,
+       failgroup,
+       state,
+       path,
+       read_errs,
+       write_errs
+FROM v$asm_disk
+WHERE state != 'NORMAL'
+   OR read_errs > 0
+   OR write_errs > 0;
+```
+
+### Diskgroup Mount Hatası
+
+```bash
+# ASM alert log'u kontrol et
+tail -100 $ORACLE_HOME/diag/asm/+asm/+ASM1/trace/alert_+ASM1.log
+
+# Disk permission'ları kontrol et
+ls -l /dev/oracleasm/disks/
+
+# ASM diskleri listele
+/etc/init.d/oracleasm listdisks
+```
+
+### Rebalance Takılıp Kalırsa
+
+```sql
+-- Rebalance işlemini iptal et
+ALTER DISKGROUP data REBALANCE POWER 0;
+
+-- ASM instance'ı restart et
+srvctl stop asm -n node1
+srvctl start asm -n node1
+```
+
+## Best Practices
+
+<Callout type="success" title="Production ASM Checklist">
+- [ ] Minimum 3 disk per diskgroup (Normal redundancy)
+- [ ] FRA için ayrı diskgroup
+- [ ] AU_SIZE doğru seçildi (Data: 4M, FRA: 1M)
+- [ ] Rebalance power production'da düşük, maintenance'da yüksek
+- [ ] Günlük diskgroup monitoring
+- [ ] Regular ASM disk health check
+- [ ] Mirror free space threshold takibi
+- [ ] Diskgroup'lar için capacity planlaması
+</Callout>
+
+## Monitoring Script'i
+
+```sql
+-- ASM diskgroup health check scripti
+SET PAGES 9999
+SET LINESIZE 200
+
+COL diskgroup FOR a20
+COL disk_name FOR a30
+COL state FOR a15
+COL path FOR a50
+
+PROMPT ***********************************************************
+PROMPT ASM DISKGROUP SUMMARY
+PROMPT ***********************************************************
+
+SELECT name AS diskgroup,
+       type,
+       total_mb,
+       free_mb,
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS used_pct,
+       required_mirror_free_mb AS mirror_mb
+FROM v$asm_diskgroup
+ORDER BY used_pct DESC;
+
+PROMPT
+PROMPT ***********************************************************
+PROMPT ASM DISK DETAILS
+PROMPT ***********************************************************
+
+SELECT dg.name AS diskgroup,
+       d.name AS disk_name,
+       d.failgroup,
+       d.state,
+       d.path,
+       d.total_mb,
+       d.free_mb,
+       d.reads,
+       d.writes
+FROM v$asm_disk d
+JOIN v$asm_diskgroup dg ON d.group_number = dg.group_number
+ORDER BY dg.name, d.name;
+
+PROMPT
+PROMPT ***********************************************************
+PROMPT ASM REBALANCE STATUS
+PROMPT ***********************************************************
+
+SELECT group_number,
+       operation,
+       state,
+       power,
+       est_minutes
+FROM v$asm_operation;
+```
+
+## Capacity Planning
+
+```sql
+-- ASM büyüme öngörüsü (son 3 ay için)
+WITH current_size AS (
+  SELECT name,
+         SUM(total_mb) AS total_mb,
+         SUM(free_mb) AS free_mb
+  FROM v$asm_diskgroup
+  GROUP BY name
+)
+SELECT name,
+       ROUND(total_mb / 1024, 2) AS total_gb,
+       ROUND(free_mb / 1024, 2) AS free_gb,
+       ROUND((total_mb - free_mb) / 1024, 2) AS used_gb,
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS used_pct,
+       -- %15 aylık büyüme varsayımıyla
+       ROUND(used_gb * 1.45, 2) AS projected_3_months_gb
+FROM current_size
+ORDER BY used_pct DESC;
+```
+
+## Sonraki Adımlar
+
+- [ ] ASM diskgroup'ları için monitoring script'i schedule edin
+- [ ] Capacity planning raporları oluşturun
+- [ ] ASM disk health check prosedürleri geliştirin
+- [ ] ASM disk failure scenario'ları için disaster recovery planı hazırlayın
+- [ ] Regular ASM disk addition/removal prosedürleri dokümante edin
+
+## Kaynaklar
+
+- Oracle Documentation: ASM Administration Guide
+- My Oracle Support: ASM Best Practices (Doc ID 330369.1)
+- Oracle ASM Technical Overview

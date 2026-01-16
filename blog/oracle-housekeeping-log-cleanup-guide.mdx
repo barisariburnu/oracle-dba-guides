@@ -1,0 +1,86 @@
+---
+title: "Oracle Veritabanı Housekeeping: Log ve Trace Dosyalarını Otomatik Temizleme"
+description: "Oracle veritabanında diag dizini altındaki trace (.trc), metadata (.trm) ve alert log dosyalarını otomatik temizleme (housekeeping) scriptleri ve Cron yönetimi."
+date: "2026-01-16"
+category: "Linux"
+tags: ["Oracle Maintenance", "Housekeeping", "Linux Bash", "Trace Cleanup", "Cron Job", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Housekeeping: Log ve Trace Temizleme
+
+Oracle veritabanı çalışmaya devam ettikçe `ADR` (Automatic Diagnostic Repository) dizini altında binlerce trace (`.trc`) ve metadata (`.trm`) dosyası üretir. Eğer bu dosyalar düzenli olarak temizlenmezse, disk alanı (özellikle `/u01` veya `/u02` gibi kritik dizinler) dolarak veritabanının durmasına neden olabilir. Bu süreci otomatize etmek, bir DBA'nın sistem sağlığını korumak için yapması gereken ilk işlerden biridir. Bu makalede, Linux bash scriptleri kullanarak bu "ev temizliği" (housekeeping) işlemini nasıl yapacağımızı inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Temizleme Scriptlerinin Mantığı (Find Komutu)
+
+Linux'un güçlü `find` komutu, belirli bir tarihten eski dosyaları bulup silmek için en ideal araçtır. Oracle diag dizinindeki dosyaları temizlemek için şu komut yapısını kullanırız:
+
+```bash
+# 7 günden eski .trc (Trace) dosyalarını sil
+find /u01/app/oracle/diag/rdbms/orcl/ORCL/trace -name "*.trc" -mtime +7 -exec rm -f {} \;
+
+# 7 günden eski .trm (Metadata) dosyalarını sil
+find /u01/app/oracle/diag/rdbms/orcl/ORCL/trace -name "*.trm" -mtime +7 -exec rm -f {} \;
+
+# 'cdmp' ile başlayan core dump dizinlerini sil
+find /u01/app/oracle/diag/rdbms/orcl/ORCL/trace -name "cdmp*" -type d -mtime +7 -exec rm -rf {} \;
+```
+
+---
+
+## 2. Otomatik Housekeeping Scripti
+
+Aşağıdaki scripti `housekeeping.sh` olarak kaydedip, veritabanı bazlı özelleştirebilirsiniz.
+
+```bash
+#!/bin/bash
+# Oracle Housekeeping Script
+
+# Değişkenler
+DIAG_PATH="/u01/app/oracle/diag/rdbms/prod/PROD/trace"
+RETENTION_DAYS=15
+
+echo "Temizlik baslatiliyor: $(date)"
+
+# Trace dosyalarını temizle
+find $DIAG_PATH -name "*.trc" -mtime +$RETENTION_DAYS -delete
+find $DIAG_PATH -name "*.trm" -mtime +$RETENTION_DAYS -delete
+
+# Listener log temizliği (Eski yöntem)
+# ADRCI kullanılması önerilir ancak manuel find da işe yarar
+find /u01/app/oracle/diag/tnslsnr -name "listener*.log" -mtime +30 -delete
+
+echo "Temizlik tamamlandi."
+```
+
+---
+
+## 3. ADRCI ile Modern Temizleme
+
+Oracle 11g ile gelen `ADRCI` (ADR Command Interface), bu iş için daha yerleşik bir yöntem sunar. Manuel dosya silmek yerine Oracle'ın kendi aracını kullanmak daha güvenlidir.
+
+```bash
+# ADRCI üzerinden son 1 haftayı (10080 dakika) tut, kalanını sil
+adrci exec "set home rdbms/prod/PROD; purge -age 10080 -type trace"
+```
+
+---
+
+## 4. İşlemi Otomatize Etme (Cron Job)
+
+Scriptinizi her gece saat 02:00'de çalışacak şekilde `crontab`'a ekleyin:
+
+```bash
+# crontab -e
+00 02 * * * /home/oracle/scripts/housekeeping.sh >> /home/oracle/scripts/housekeeping.log 2>&1
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Test Etmeden Silme:** Komutun sonundaki `-delete` veya `-exec rm` kısmını eklemeden önce komutu çalıştırıp hangi dosyaların listelendiğini kontrol edin.
+-   **Alert Log'a Dikkat:** `alert_ORCL.log` dosyasını asla silmeyin. Bunun yerine `cp /dev/null alert_ORCL.log` yaparak içeriğini boşaltabilir veya ADRCI purge kullanabilirsiniz.
+-   **Merkezi Yönetim:** Birden fazla veritabanınız varsa, $ORACLE_HOME/network/admin altındaki listener loglarını ve audit dizinlerini de housekeeping kapsamına alın.
+
+Düzenli temizlik, "Disk Full" kaynaklı sürpriz kesintilerin önüne geçmenin en basit ve etkili yoludur.

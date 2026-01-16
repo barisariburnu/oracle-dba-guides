@@ -1,0 +1,95 @@
+---
+title: "Oracle ASM Disk ve Diskgroup Yönetim Rehberi"
+description: "Oracle ASM (Automatic Storage Management) disk yönetimi, disk ekleme ve çıkarma işlemleri, rebalance güç ayarları ve ASM disk sorgulama teknikleri."
+date: "2026-01-16"
+category: "Depolama"
+tags: ["Oracle ASM", "Diskgroup", "Rebalance", "Storage Management", "ASM Disk", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle ASM Disk ve Diskgroup Yönetim Rehberi
+
+Oracle **ASM (Automatic Storage Management)**, veritabanı dosyaları için optimize edilmiş bir dosya sistemi ve volume manager yapısıdır. Veriyi tüm disklere eşit şekilde dağıtarak I/O performansını artırır ve disk arızalarına karşı koruma sağlar. Bir DBA olarak, ASM disklerinin durumunu izlemek, yeni disk eklemek veya eskiyen diskleri sistemden güvenle çıkarmak en rutin görevlerimizden biridir. Bu makalede, ASM operasyonlarını yönetmek için kullanılan temel komutları ve en iyi uygulamaları inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. ASM Disk ve Grup Durumunu Sorgulama
+
+Sistemdeki ASM disklerinin mount olup olmadığını ve header durumlarını kontrol etmek:
+
+```sql
+SELECT group_number, 
+       disk_number, 
+       mount_status, 
+       header_status, 
+       state, 
+       name, 
+       path 
+FROM v$asm_disk
+ORDER BY group_number, disk_number;
+```
+- **HEADER_STATUS:** `MEMBER` (Gruba dahil), `CANDIDATE` (Eklenebilir), `PROVISIONED` (ASMLib ile atanmış) olmalıdır.
+
+Disk gruplarının doluluk oranını görmek için:
+
+```sql
+SELECT name, 
+       total_mb, 
+       free_mb, 
+       ROUND((total_mb - free_mb) / total_mb * 100, 2) AS pct_used
+FROM v$asm_diskgroup;
+```
+
+---
+
+## 2. Disk Ekleme ve Karma (Drop) İşlemleri
+
+Bir disk grubuna yeni bir disk eklemek veya mevcut bir diski çıkarmak için:
+
+```sql
+-- Disk Ekleme
+ALTER DISKGROUP DATA ADD DISK '/devices/disk05' NAME DATA_0005;
+
+-- Disk Çıkarma (Drop)
+ALTER DISKGROUP DATA DROP DISK DATA_0032;
+```
+
+---
+
+## 3. Rebalance Operasyonu ve Hız Ayarı (POWER)
+
+ASM üzerinde bir disk eklendiğinde veya çıkarıldığında, veri otomatik olarak tüm disklere yeniden dağıtılır (Rebalance). Bu işlemin hızı `POWER` parametresi ile ayarlanır.
+
+```sql
+-- Rebalance işlemini hızlandırmak (Örn: Power 8)
+ALTER DISKGROUP DATA REBALANCE POWER 8;
+
+-- Devam eden operasyonları izleme
+SELECT group_number, 
+       operation, 
+       state, 
+       power, 
+       est_minutes 
+FROM v$asm_operation;
+```
+
+---
+
+## 4. ASM Diskgroup İsim Değiştirme (Rename)
+
+Zaman zaman test ortamından production'a taşınan veya farklı nedenlerle ismi değiştirilmesi gereken disk grupları için `renamedg` aracı kullanılır. Bu işlem sırasında disk grubu **dismount** edilmelidir.
+
+```bash
+# İşletim sistemi seviyesinde (Grid kullanıcısı ile)
+renamedg dgname=OLD_DG newdgname=NEW_DG check=true
+```
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **Redundancy (Artıklık):** Disk gruplarını oluştururken verinin kritiklik seviyesine göre `External`, `Normal` (2-way) veya `High` (3-way) redundancy seçeneklerini doğru belirleyin.
+-   **Rebalance Zamanlaması:** Yüksek `POWER` değerleri rebalance işlemini hızlandırır ancak sistemin genel I/O performansını (ve dolayısıyla CPUyu) geçici olarak yorabilir. Mesai saatleri dışında yüksek değerler kullanılması önerilir.
+-   **Header Kontrolü:** Yeni eklediğiniz disk `v$asm_disk` içinde görünmüyorsa, işletim sistemi seviyesinde disk izinlerini (`oracle:grid`) ve sahipliğini kontrol edin.
+
+ASM, veritabanı depolama yönetimini karmaşıklıktan kurtararak DBA'lara esneklik sunar. Doğru izleme araçları ve komutlarıyla ASM altyapınızı yüksek performanslı ve dayanıklı tutabilirsiniz.

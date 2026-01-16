@@ -1,0 +1,345 @@
+---
+title: "Oracle Tablespace Monitoring - Kapsamlı Rehber"
+description: "Oracle tablespace kullanımını izleme, boş alan analizi, kullanım oranları ve kritik threshold'lar için comprehensive monitoring scripti ve best practices."
+date: 2025-01-16
+category: "Oracle Storage Management"
+tags: ["oracle", "tablespace", "storage", "monitoring", "dba", "datafile"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Tablespace Monitoring - Kapsamlı Rehber
+
+Tablespace monitoring, Oracle DBA'lerin en kritik günlük görevlerinden biridir. Bu makalede, tablespace kullanımını detaylı şekilde analiz eden, alert üreten ve storage planlaması için veri sağlayan kapsamlı bir monitoring scripti sunacağım.
+
+
+<!--truncate-->
+## Script'in Özellikleri
+
+Bu monitoring scripti şu analyses'leri sunar:
+- Database genelinde storage kullanımı
+- Tablespace bazında kullanım oranları
+- Kritik threshold (%85 üzeri) uyarıları
+- Invalid object sayısı
+- Detaylı tablespace istatistikleri
+
+<Callout type="info" title="Önkoşullar">
+Bu script'i çalıştırmak için:
+- DBA role yetkisine ihtiyacınız var
+- `DBA_DATA_FILES`, `DBA_FREE_SPACE`, `DBA_SEGMENTS` view'lerine erişim
+- Oracle 9i veya üzeri versiyon
+</Callout>
+
+## Ana Monitoring Scripti
+
+```sql
+SET PAGES 9999;
+SET FEEDBACK ON;
+SET VERIFY OFF;
+COLUMN col1 NEW_VALUE dosyaadi;
+SELECT 'd:\Raporlar\'||UPPER(TRIM(name))||'_'||TO_CHAR(SYSDATE,'yyyymmdd')||'.lst' col1
+  FROM v$database;
+SPOOL &dosyaadi;
+
+SELECT TO_CHAR(SYSDATE, 'dd/mm/yyyy hh24:mi:ss') TARIH FROM DUAL;
+
+PROMPT
+PROMPT ***********************************************************
+PROMPT  INVALID_OBJECT_COUNT
+PROMPT ***********************************************************
+PROMPT
+
+SELECT COUNT(*) Invalid_object_count
+  FROM dba_objects
+ WHERE status ='INVALID';
+
+PROMPT
+PROMPT ***********************************************************
+PROMPT  DATABASE BUYUKLUGU,KULLANILAN ALAN ,BOS ALAN
+PROMPT ***********************************************************
+PROMPT
+
+SELECT
+  (SELECT SUM(bytes)/ POWER(2, 30) FROM dba_data_files) Toplam_Alan_gb,
+  (SELECT SUM(bytes)/POWER(2, 30) FROM dba_segments) Kullanilan_Alan_gb,
+  (SELECT SUM(bytes)/ POWER(2, 30) FROM dba_free_space) Bos_Alan_gb
+FROM dual;
+
+PROMPT
+PROMPT ***********************************************************
+PROMPT  TABLESPACE BAZINDA TOPLAM ALAN,KULLANILAN ALAN,BOS ALAN,KULLANILAN ALAN ORANI
+PROMPT ***********************************************************
+PROMPT
+
+SELECT Total.name "Tablespace Name",
+       total_space,
+       NVL(total_space-Free_space, 0) Used,
+       NVL(Free_space, 0) Free,
+       ROUND((NVL(total_space-Free_space, 0)*100)/total_space,1) USED_PERCENT
+FROM
+  (SELECT tablespace_name, SUM(bytes/1024/1024) Free_Space
+     FROM sys.dba_free_space
+    GROUP BY tablespace_name
+  ) Free,
+  (SELECT b.name, SUM(bytes/1024/1024) TOTAL_SPACE
+     FROM sys.v_$datafile a, sys.v_$tablespace B
+    WHERE a.ts# = b.ts#
+    GROUP BY b.name
+  ) Total
+WHERE Free.Tablespace_name(+) = Total.name
+ORDER BY USED_PERCENT;
+
+PROMPT
+PROMPT ***********************************************************
+PROMPT  KRITIK TABLESPACELER (%85 UZERI)
+PROMPT ***********************************************************
+PROMPT
+
+SELECT Total.name "Tablespace Name",
+       ROUND((NVL(total_space-Free_space, 0)*100)/total_space,1) USED_PERCENT
+FROM
+  (SELECT tablespace_name, SUM(bytes/1024/1024) Free_Space
+     FROM sys.dba_free_space
+    GROUP BY tablespace_name
+  ) Free,
+  (SELECT b.name, SUM(bytes/1024/1024) TOTAL_SPACE
+     FROM sys.v_$datafile a, sys.v_$tablespace B
+    WHERE a.ts# = b.ts#
+    GROUP BY b.name
+  ) Total
+WHERE Free.Tablespace_name(+) = Total.name
+  AND ROUND((NVL(total_space-Free_space, 0)*100)/total_space,1) > 85
+ORDER BY USED_PERCENT DESC;
+
+SPOOL OFF;
+```
+
+## Çıktı Analizi
+
+### Database Genelinde Storage Kullanımı
+
+| Kolon | Açıklama | Birim |
+|-------|----------|-------|
+| Toplam_Alan_gb | Toplam allocated alan | GB |
+| Kullanilan_Alan_gb | Segment'ler tarafından kullanılan alan | GB |
+| Bos_Alan_gb | Boş kullanılabilir alan | GB |
+
+### Tablespace Bazında Kullanım
+
+| Kolon | Açıklama |
+|-------|----------|
+| Tablespace Name | Tablespace adı |
+| total_space | Toplam allocated alan (MB) |
+| Used | Kullanılan alan (MB) |
+| Free | Boş alan (MB) |
+| USED_PERCENT | Kullanım yüzdesi |
+
+## Kritik Threshold'lar
+
+Production ortamları için önerilen threshold'lar:
+
+<Callout type="warning" title="Alert Seviyeleri">
+- **%85+**: Kritik (CRITICAL) - Acil müdahale gerekli
+- **%75-85%**: Uyarı (WARNING) - Planlama başlamalı
+- **%60-75%**: Bilgi (INFO) - İzleme devam etmeli
+- **%60-**: Normal (OK) - Sorun yok
+</Callout>
+
+## Alternatif Sorgular
+
+### Bigfile Tablespace İçin
+
+```sql
+SELECT tablespace_name,
+       ROUND(bytes/1024/1024/1024, 2) size_gb,
+       ROUND(maxbytes/1024/1024/1024, 2) max_size_gb,
+       ROUND(autoextensible_size/1024/1024/1024, 2) autoextensible_gb,
+       ROUND((bytes/1024/1024/1024) / (maxbytes/1024/1024/1024) * 100, 2) usage_percent
+FROM (
+  SELECT tablespace_name,
+         SUM(bytes) bytes,
+         SUM(CASE WHEN autoextensible = 'YES' THEN maxbytes ELSE bytes END) maxbytes,
+         SUM(CASE WHEN autoextensible = 'YES' THEN bytes ELSE 0 END) autoextensible_size
+  FROM dba_data_files
+  GROUP BY tablespace_name
+)
+ORDER BY usage_percent DESC;
+```
+
+### Autoextend Dahil Hesaplama
+
+```sql
+SELECT df.tablespace_name,
+       ROUND(df.total_space_gb, 2) total_gb,
+       ROUND(df.used_space_gb, 2) used_gb,
+       ROUND(df.free_space_gb, 2) free_gb,
+       ROUND(df.max_space_gb, 2) max_gb,
+       ROUND((df.used_space_gb / df.max_space_gb) * 100, 2) pct_used
+FROM (
+  SELECT tablespace_name,
+         SUM(bytes)/1024/1024/1024 total_space_gb,
+         SUM(bytes - NVL(fs.bytes, 0))/1024/1024/1024 used_space_gb,
+         SUM(NVL(fs.bytes, 0))/1024/1024/1024 free_space_gb,
+         SUM(CASE
+             WHEN autoextensible = 'YES' THEN maxbytes
+             ELSE bytes
+           END)/1024/1024/1024 max_space_gb
+  FROM dba_data_files df
+  LEFT JOIN (
+    SELECT tablespace_name, file_id, SUM(bytes) bytes
+    FROM dba_free_space
+    GROUP BY tablespace_name, file_id
+  ) fs ON (df.file_id = fs.file_id AND df.tablespace_name = fs.tablespace_name)
+  GROUP BY tablespace_name
+) df
+ORDER BY (df.used_space_gb / df.max_space_gb) DESC;
+```
+
+## SYSTEM ve SYSAUX Tablespace'leri
+
+System tablespace'leri için özel monitoring:
+
+```sql
+SELECT tablespace_name,
+       ROUND(SUM(bytes)/1024/1024, 2) size_mb,
+       ROUND(SUM(CASE
+         WHEN autoextensible = 'YES' THEN maxbytes
+         ELSE bytes
+       END)/1024/1024, 2) max_mb
+FROM dba_data_files
+WHERE tablespace_name IN ('SYSTEM', 'SYSAUX')
+GROUP BY tablespace_name;
+```
+
+<Callout type="info" title="Best Practice">
+SYSTEM ve SYSAUX tablespace'lerinde %75+ kullanımda müdahale edin. Bu tablespace'ler autoextend olsa bile düzenli bakım gerektirir.
+</Callout>
+
+## Monitoring Otomasyonu
+
+### Günlük Check Script'i
+
+```bash
+#!/bin/bash
+# daily_tablespace_check.sh
+
+ORACLE_SID=${1:-"ORCL"}
+ORACLE_HOME=/u01/app/oracle/product/19c/dbhome_1
+DATE=$(date +%Y%m%d)
+REPORT_DIR=/u01/app/oracle/admin/reports
+
+$ORACLE_HOME/bin/sqlplus -s / as sysdba @tablespace_monitor.sql
+
+# Kritik tablespace'leri mail olarak gönder
+grep "CRITICAL" $REPORT_DIR/tablespace_report_${DATE}.lst && \
+mail -s "CRITICAL: Tablespace Alert" dba@company.com < $REPORT_DIR/tablespace_report_${DATE}.lst
+```
+
+### Cron Job Kurulumu
+
+```bash
+# Her sabah 08:00'da çalıştır
+0 8 * * * /u01/scripts/daily_tablespace_check.sh PROD > /dev/null 2>&1
+
+# Her 4 saatte bir kontrol (production için)
+0 */4 * * * /u01/scripts/daily_tablespace_check.sh PROD > /dev/null 2>&1
+```
+
+## Tablespace Büyüme Trend Analizi
+
+```sql
+-- Tablespace büyüme oranını izle
+WITH growth_data AS (
+  SELECT TO_CHAR(sn.end_interval_time, 'YYYY-MM') month,
+         ts.tablespace_name,
+         ROUND(SUM(ts.tablespace_size) / 1024 / 1024 / 1024, 2) size_gb
+  FROM dba_hist_tbspc_space_usage ts
+  JOIN dba_hist_snapshot sn ON ts.snap_id = sn.snap_id
+  WHERE sn.end_interval_time > ADD_MONTHS(SYSDATE, -6)
+  GROUP BY TO_CHAR(sn.end_interval_time, 'YYYY-MM'),
+           ts.tablespace_name
+)
+SELECT month,
+       tablespace_name,
+       size_gb,
+       LEAD(size_gb) OVER (PARTITION BY tablespace_name ORDER BY month) - size_gb AS growth_gb
+FROM growth_data
+ORDER BY tablespace_name, month;
+```
+
+## Storage Planlama İçin Öngörü
+
+```sql
+-- Gelecek 3 ay için tahmin
+WITH current_usage AS (
+  SELECT tablespace_name,
+         SUM(bytes)/1024/1024/1024 current_gb,
+         SUM(CASE WHEN autoextensible = 'YES' THEN maxbytes ELSE bytes END)/1024/1024/1024 max_gb
+  FROM dba_data_files
+  GROUP BY tablespace_name
+)
+SELECT tablespace_name,
+       ROUND(current_gb, 2) current_gb,
+       ROUND(max_gb, 2) max_gb,
+       ROUND((current_gb / max_gb) * 100, 2) current_pct,
+       ROUND(current_gb * 1.15, 2) projected_1_month,
+       ROUND(current_gb * 1.32, 2) projected_3_months
+FROM current_usage
+WHERE (current_gb / max_gb) > 0.6
+ORDER BY (current_gb / max_gb) DESC;
+```
+
+## Troubleshooting
+
+### Tablespace Doluluk Sorunu
+
+```sql
+-- En büyük segment'leri bul
+SELECT owner,
+       segment_name,
+       segment_type,
+       ROUND(bytes/1024/1024, 2) size_mb,
+       tablespace_name
+FROM dba_segments
+WHERE tablespace_name = 'YOUR_TABLESPACE'
+ORDER BY bytes DESC
+FETCH FIRST 10 ROWS ONLY;
+```
+
+### Boş Alan Fragmentasyonu
+
+```sql
+-- Fragmentasyon analizi
+SELECT tablespace_name,
+       COUNT(*) fragments,
+       MAX(bytes)/1024/1024 largest_fragment_mb,
+       SUM(bytes)/1024/1024 total_free_mb
+FROM dba_free_space
+WHERE tablespace_name = 'YOUR_TABLESPACE'
+GROUP BY tablespace_name;
+```
+
+## Best Practices
+
+<Callout type="success" title="Production Checklist">
+- [ ] Günlük otomatik monitoring kuruldu
+- [ ] Kritik threshold'lar belirlendi (%75, %85)
+- [ ] Alert mekanizması test edildi
+- [ ] Büyüme trendleri takip ediliyor
+- [ ] Storage kapasite planlaması yapılıyor
+- [ ] SYSTEM/SYSAUX özel olarak izleniyor
+- [ ] Bigfile tablespace'ler autoextend ile monitor ediliyor
+</Callout>
+
+## Sonraki Adımlar
+
+- [ ] Weekly storage planning review yapın
+- [ ] Quarterly capacity planning yapın
+- [ ] Autoextend policy'leri gözden geçirin
+- [ ] Critical tablespace'ler için proactive space ekleme stratejisi geliştirin
+- [ ] Monitoring sonuçlarını history table'a kaydedin
+
+## Kaynaklar
+
+- Oracle Documentation: Managing Tablespaces
+- My Oracle Support: Tablespace Full Errors (Doc ID 1463784.1)
+- Oracle Database Administrator's Guide

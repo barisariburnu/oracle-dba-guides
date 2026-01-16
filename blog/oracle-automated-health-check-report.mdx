@@ -1,0 +1,111 @@
+---
+title: "Oracle Veritabanı Otomatik Günlük Kontrol Raporu (Bash & SQL)"
+description: "SQL*Plus HTML markup özelliğini kullanarak veritabanı durumunu, tablespace doluluklarını, backup ve job hatalarını içeren otomatik HTML raporu oluşturma rehberi."
+date: 2026-01-16
+category: "Oracle Otomasyon"
+tags: ["oracle", "health check", "automation", "bash", "html report", "dba", "monitoring"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Otomatik Günlük Kontrol Raporu
+
+Bir Oracle DBA'nın en büyük zaman kazandıran araçlarından biri, her sabah veritabanlarına tek tek bağlanmak yerine, tüm kritik bilgileri bir araya getiren otomatik bir raporlama sistemidir. Bu makalede, Bash ve SQL kullanarak görsel bir HTML raporu nasıl oluşturulur onu göreceğiz.
+
+
+<!--truncate-->
+## Sistem Nasıl Çalışır?
+
+1. **Bash Script:** Ortam değişkenlerini ayarlar ve gerekli SQL scriptlerini çağırır.
+2. **SQL Script:** `SET MARKUP HTML ON` komutunu kullanarak sorgu sonuçlarını HTML tablo formatında spool eder.
+3. **Email/İç Sayfa:** Oluşan HTML dosyası bir web sunucusuna kopyalanabilir veya e-mail ile gönderilebilir.
+
+## SQL Rapor Şablonu (`dbcontrol.sql`)
+
+Bu script, HTML formatında çıktı üretmek için yapılandırılmıştır:
+
+```sql
+SET MARKUP HTML ON SPOOL ON PREFORMAT OFF ENTMAP ON
+SET LINESIZE 150
+SET PAGESIZE 150
+
+SPOOL /home/oracle/reports/daily_check.html
+
+-- 1. Database Durumu
+SELECT i.host_name, i.instance_name, d.name, d.open_mode, i.startup_time
+FROM v$instance i, v$database d;
+
+-- 2. Tablespace Doluluk Oranları
+SELECT a.tablespace_name,
+       ROUND(a.bytes_alloc / 1024 / 1024) allocated_MB,
+       ROUND(NVL(b.bytes_free, 0) / 1024 / 1024) free_MB,
+       100 - ROUND((NVL(b.bytes_free, 0) / a.bytes_alloc) * 100) pct_used
+FROM (SELECT tablespace_name, SUM(bytes) bytes_alloc FROM dba_data_files GROUP BY tablespace_name) a,
+     (SELECT tablespace_name, SUM(bytes) bytes_free FROM dba_free_space GROUP BY tablespace_name) b
+WHERE a.tablespace_name = b.tablespace_name(+);
+
+-- 3. RMAN Backup Durumu (Son 24 saat)
+SELECT start_time, input_type, status, ROUND(elapsed_seconds/3600, 1) duration_hr
+FROM v$rman_backup_job_details
+WHERE start_time > SYSDATE - 1;
+
+-- 4. Alert Log Hataları
+SELECT message_text, originating_timestamp
+FROM X$DBGALERTEXT
+WHERE (message_text LIKE '%ORA-%' OR message_text LIKE '%Error%')
+  AND originating_timestamp > SYSDATE - 1;
+
+SPOOL OFF;
+```
+
+## Bash Otomasyon Scripti (`dbkontrol.sh`)
+
+Bu script birden fazla instance için raporu çalıştırır ve sonuçları birleştirir:
+
+```bash
+#!/bin/bash
+
+# Ortam değişkenlerini tanımlayın
+export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+export PATH=$ORACLE_HOME/bin:$PATH
+export REPORT_PATH=/home/oracle/reports/
+
+DATABASES="PROD1 TEST1"
+
+for DB in $DATABASES
+do
+    export ORACLE_SID=$DB
+    echo "Processing $DB..."
+    
+    # SQL raporunu çalıştır
+    sqlplus -s / as sysdba @dbcontrol.sql
+    
+    # Oluşan raporu tarihli olarak sakla
+    cp /home/oracle/reports/daily_check.html $REPORT_PATH/${DB}_$(date +%Y%m%d).html
+done
+```
+
+## Görsel Özelleştirmeler
+
+HTML raporunuzun daha premium görünmesi için SQL içinde CSS stilleri ekleyebilirsiniz:
+
+```sql
+SET MARKUP HTML ON SPOOL ON -
+HEAD "<style type='text/css'> -
+  body {font-family: Arial, sans-serif; background-color: #f4f4f4;} -
+  table {border-collapse: collapse; width: 100%; margin-bottom: 20px;} -
+  th {background-color: #d32f2f; color: white; padding: 10px;} -
+  td {border: 1px solid #ddd; padding: 8px; text-align: left;} -
+  tr:nth-child(even) {background-color: #f2f2f2;} -
+  .critical {color: red; font-weight: bold;} -
+  </style>"
+```
+
+<Callout type="success" title="Avantajlar">
+- **Zaman Tasarrufu:** Sabah geldiğinizde tüm sistemlerin durumunu tek bir sayfada görürsünüz.
+- **Historik Takip:** Loglar sayesinde geçmişteki değişimleri (tablespace büyümesi vb.) izleyebilirsiniz.
+- **Ekip İletişimi:** Raporu tüm ekibe otomatik e-mail atarak şeffaflık sağlayabilirsiniz.
+</Callout>
+
+## Sonuç
+
+Otomatik raporlama, bir DBA'nın reaktif çalışmaktan proaktif çalışmaya geçmesini sağlayan en önemli araçtır. Bu yapı ile sadece veritabanı değil, OS seviyesindeki disk (`df -h`) ve memory (`free -m`) bilgilerini de raporunuza dahil ederek full-stack monitoring gerçekleştirebilirsiniz.

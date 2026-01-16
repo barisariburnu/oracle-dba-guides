@@ -1,0 +1,96 @@
+---
+title: "Oracle Veritabanı Üzerinden E-posta Gönderme ve FTP İşlemleri"
+description: "Oracle veritabanında PL/SQL kullanarak e-posta gönderimi (UTL_SMTP) ve dosya transferi (FTP) işlemlerinin yapılandırılması ve kullanımı."
+date: "2026-01-16"
+category: "Geliştirme"
+tags: ["Oracle", "UTL_SMTP", "FTP", "PL/SQL", "Automation", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı ile E-posta ve FTP Operasyonları
+
+Oracle veritabanı, sadece veri saklamakla kalmaz, aynı zamanda dış dünya ile entegre olabilen güçlü paketler sunar. Veritabanı içinde çalışan bir job'ın sonucu size e-posta ile bildirmesi veya bir rapor dosyasını otomatik olarak uzak bir FTP sunucusuna yüklemesi, operasyonel verimliliği zirveye çıkarır.
+
+
+<!--truncate-->
+Bu makalede, `UTL_SMTP` ile e-posta gönderimini ve PL/SQL ile FTP süreçlerini inceleyeceğiz.
+
+## 1. UTL_SMTP ile E-posta Gönderimi
+
+Oracle'da e-posta göndermek için `UTL_SMTP` paketi kullanılır. Bu paket, SMTP protokolü üzerinden mail sunucunuzla haberleşir.
+
+### Basit E-posta Gönderme Örneği
+```sql
+DECLARE
+  l_mail_conn  UTL_SMTP.connection;
+BEGIN
+  l_mail_conn := UTL_SMTP.open_connection('smtp.company.com', 25);
+  UTL_SMTP.helo(l_mail_conn, 'smtp.company.com');
+  UTL_SMTP.mail(l_mail_conn, 'dba@company.com');
+  UTL_SMTP.rcpt(l_mail_conn, 'dba@company.com');
+  
+  UTL_SMTP.open_data(l_mail_conn);
+  UTL_SMTP.write_data(l_mail_conn, 'Subject: Veritabanı Uyarısı' || UTL_TCP.CRLF);
+  UTL_SMTP.write_data(l_mail_conn, 'Mesaj: Günlük yedekleme başarıyla tamamlandı.');
+  UTL_SMTP.close_data(l_mail_conn);
+  
+  UTL_SMTP.quit(l_mail_conn);
+END;
+/
+```
+*Not: Oracle 11g ve sonrası sürümlerde, SMTP sunucusuna erişim için **ACL (Access Control List)** tanımlanması zorunludur.*
+
+---
+
+## 2. PL/SQL ile FTP İşlemleri
+
+Oracle içinde standart bir FTP paketi bulunmasa da, `UTL_TCP` kullanılarak yazılmış popüler FTP kütüphaneleri mevcuttur. Bu paketler sayesinde veritabanı dizinindeki (`DIRECTORY`) bir dosyayı uzak sunucuya gönderebilir veya oradan dosya alabilirsiniz.
+
+### FTP ile Dosya Gönderme (Put)
+```sql
+DECLARE
+  l_conn  UTL_TCP.connection;
+BEGIN
+  -- FTP Sunucusuna Login
+  l_conn := ftp.login('ftp.hedef-sunucu.com', '21', 'kullanici', 'sifre');
+  
+  -- Dosyayı Gönder
+  ftp.put(p_conn      => l_conn,
+          p_from_dir  => 'DATA_PUMP_DIR',
+          p_from_file => 'gunluk_rapor.csv',
+          p_to_file   => '/arsiv/rapor_2024.csv');
+          
+  ftp.logout(l_conn);
+END;
+/
+```
+
+---
+
+## 3. ACL (Access Control List) Yapılandırması
+
+Güvenlik nedeniyle Oracle, veritabanından dışarıya yapılacak ağ bağlantılarını kısıtlar. E-posta veya FTP kullanabilmek için ilgili kullanıcıya yetki verilmelidir:
+
+```sql
+BEGIN
+  DBMS_NETWORK_ACL_ADMIN.CREATE_ACL (
+    acl          => 'network_access.xml',
+    description  => 'Mail ve FTP Yetkisi',
+    principal    => 'DB_USER',
+    is_grant     => TRUE,
+    privilege    => 'connect');
+
+  DBMS_NETWORK_ACL_ADMIN.ASSIGN_ACL (
+    acl  => 'network_access.xml',
+    host => 'smtp.company.com');
+END;
+/
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Mime-Type:** Zengin içerikli (HTML) veya ekli (Attachment) e-postalar göndermek için `UTL_MAIL` paketi veya karmaşık `MIME` yapısı kullanılmalıdır.
+-   **SSL/TLS:** Modern mail sunucuları SSL/TLS gerektirir. Bu durumda Oracle Wallet kullanarak güvenli bağlantı kurulmalıdır.
+-   **Error Handling:** Ağ kesintilerine karşı kodunuzun içine mutlaka `EXCEPTION` blokları ve kontol mekanizmaları ekleyin.
+
+E-posta ve FTP entegrasyonu, veritabanınızı yaşayan ve haberleşen akıllı bir sisteme dönüştürür.

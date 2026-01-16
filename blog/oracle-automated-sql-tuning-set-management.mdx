@@ -1,0 +1,139 @@
+---
+title: "Oracle Otomatize SQL Tuning Set (STS) Yönetimi: Top SQL Takibi"
+description: "Oracle veritabanında SQL Tuning Set (STS) oluşturma, AWR ve Cursor Cache üzerinden veri yükleme, Scheduler Job ile dinamik STS yönetimi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle STS", "SQL Tuning Set", "DBMS_SQLTUNE", "Automation", "DBA", "Performance Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Otomatize SQL Tuning Set (STS) Yönetimi
+
+**SQL Tuning Set (STS)**, bir veya birden fazla SQL sorgusunu, çalışma planlarını ve istatistiklerini bir kap içerisinde toplamanızı sağlayan güçlü bir Oracle özelliğidir. STS'ler genellikle performans analizi yapmak, SQL Tuning Advisor çalıştırmak veya sorguları bir veritabanından diğerine taşımak için kullanılır. Bu makalede, STS'leri manuel olarak doldurmanın ötesine geçip, belirli kriterlere (eşik değerleri) uyan sorguları otomatik olarak toplayan sistemli bir yapıyı nasıl kuracağımızı inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden STS Kullanmalıyız?
+
+1.  **Workload Paketleme:** Belirli bir uygulamanın tüm ağır sorgularını tek bir pakette toplayabilirsiniz.
+2.  **Karşılaştırmalı Analiz:** Bir yama (patch) veya parametre değişikliği öncesi ve sonrası performansı kıyaslayabilirsiniz.
+3.  **Otomasyon:** Sürekli olarak 5 saniyeden uzun süren sorguları bir STS itip gece otomatik analiz ettirebilirsiniz.
+
+---
+
+## 1. SQL Tuning Set Oluşturma ve Sorgulama
+
+İlk adım boş bir STS kabı oluşturmaktır:
+
+```sql
+BEGIN
+  DBMS_SQLTUNE.CREATE_SQLSET(
+    sqlset_name => 'STS_KRITIK_SORGULAR',
+    description => '5sn uzeri ve yuksek IO yapan sorgular'
+  );
+END;
+/
+
+-- Mevcut STS'leri kontrol et
+SELECT name, owner, statement_count 
+FROM dba_sqlset;
+```
+
+---
+
+## 2. STS'ye Veri Yükleme Yöntemleri
+
+### A. AWR (Geçmiş) Üzerinden Yükleme
+Snapshot aralıklarındaki en iyi 10 sorguyu STS'ye aktarmak:
+
+```sql
+DECLARE
+  l_cursor DBMS_SQLTUNE.SQLSET_CURSOR;
+BEGIN
+  OPEN l_cursor FOR
+    SELECT VALUE(p)
+    FROM TABLE(DBMS_SQLTUNE.SELECT_WORKLOAD_REPOSITORY(
+                 begin_snap => 12000,
+                 end_snap   => 12100,
+                 result_limit => 10)
+              ) p;
+
+  DBMS_SQLTUNE.LOAD_SQLSET(
+    sqlset_name     => 'STS_KRITIK_SORGULAR',
+    populate_cursor => l_cursor
+  );
+END;
+/
+```
+
+### B. Cursor Cache (Hafıza) Üzerinden Yükleme
+Şu an bellekte olan ve belirli bir şemaya ait sorguları yüklemek:
+
+```sql
+DECLARE
+  l_cursor DBMS_SQLTUNE.SQLSET_CURSOR;
+BEGIN
+  OPEN l_cursor FOR
+    SELECT VALUE(p)
+    FROM TABLE(DBMS_SQLTUNE.SELECT_CURSOR_CACHE(
+                 basic_filter => 'parsing_schema_name = ''MUHASEBE'''
+               )
+              ) p;
+
+  DBMS_SQLTUNE.LOAD_SQLSET(
+    sqlset_name     => 'STS_KRITIK_SORGULAR',
+    populate_cursor => l_cursor
+  );
+END;
+/
+```
+
+---
+
+## 3. Otomatik STS Toplama (Scheduler Job)
+
+Gerçek dünyada, DBA'nın her dakika sorgu takip etmesi zordur. Bunun yerine, her saat başı çalışan ve belirlenen eşik değerleri (Threshold) aşan sorguları STS'ye "MERGE" (birleştirme) yapan bir job kurabiliriz.
+
+```sql
+BEGIN
+   DBMS_SCHEDULER.CREATE_JOB (
+      job_name   => 'JOB_COLLECT_TOP_SQL',
+      job_type   => 'PLSQL_BLOCK',
+      job_action => 'DECLARE
+                       sqlset_cur DBMS_SQLTUNE.sqlset_cursor;
+                       l_filter   VARCHAR2(500);
+                     BEGIN
+                       -- Filtre: 3sn uzeri elapsed veya 10.000 uzeri buffer gets
+                       l_filter := ''elapsed_time >= 3000000 OR buffer_gets >= 10000'';
+                       
+                       OPEN sqlset_cur FOR 
+                         SELECT VALUE(P) FROM TABLE(
+                           dbms_sqltune.select_cursor_cache(l_filter, NULL, NULL, NULL, NULL, 1, NULL, ''TYPICAL'')) P;
+
+                       dbms_sqltune.load_sqlset(
+                         sqlset_name    => ''STS_KRITIK_SORGULAR'', 
+                         populate_cursor => sqlset_cur, 
+                         load_option     => ''MERGE'', 
+                         update_option   => ''ACCUMULATE''
+                       );
+                     END;',
+      start_date => SYSTIMESTAMP,
+      repeat_interval => 'FREQ=HOURLY; INTERVAL=1',
+      enabled    => TRUE
+   );
+END;
+/
+```
+
+---
+
+## STS Yönetimi İçin İpuçları
+
+-   **Alan Yönetimi:** STS'ler `SYSAUX` tablespace'inde yer tutar. Çok fazla sorgu topluyorsanız bu şemeyi düzenli temizlemelisiniz.
+-   **Transfer:** `DBMS_SQLTUNE.PACK_STGTAB_SQLSET` ile bir STS'yi tabloya aktarıp Data Pump ile başka veritabanına taşıyabilirsiniz. Bu, production sorunlarını test ortamında repro etmek için kritiktir.
+-   **Silme:** Gereksiz STS'leri silmeyi unutmayın:
+    `EXEC DBMS_SQLTUNE.DROP_SQLSET('STS_KRITIK_SORGULAR');`
+
+## Özet
+
+SQL Tuning Set, performans yönetiminde bir "kayıt cihazı" işlevi görür. Otomatik toplama yöntemleri ile sistemdeki darboğazları kaçırmadan izleyebilir ve tuning sürecini çok daha verimli hale getirebilirsiniz.

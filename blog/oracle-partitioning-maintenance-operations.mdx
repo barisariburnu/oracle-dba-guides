@@ -1,0 +1,91 @@
+---
+title: "Oracle Bölümleme (Partitioning) Yönetimi: Taşıma ve Bakım Operasyonları"
+description: "Oracle veritabanında partisyonları (partition) farklı tablespace'lere taşıma, indeksleri koruma ve partisyon bazlı veri arşivleme stratejileri."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Partitioning", "Alter Table Move", "Maintenance", "Storage Optimization", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Bölümleme (Partitioning) Bakım ve Taşıma Rehberi
+
+Büyük veri kümelerini yönetmek için bölümleme (Partitioning) kullanmak vazgeçilmezdir. Ancak zamanla eski verilerin bulunduğu partisyonları daha ucuz disklere (yavaş tablespace) taşımak veya dolan tablespace'lerden kurtulmak gerekebilir. Bu makalede, partisyon yönetimi için kritik bakım operasyonlarını ele alacağız.
+
+
+<!--truncate-->
+## 1. Partisyonları Başka Tablespace'e Taşıma
+
+Bir partisyonu canlı sistemde (veya bakım modunda) başka bir tablespace'e taşımak için `MOVE` komutu kullanılır.
+
+```sql
+-- Tek bir partisyonu taşıma
+ALTER TABLE SATIS_VERILERI 
+MOVE PARTITION P_2023_OCAK 
+TABLESPACE TS_ARCHIVE_2023;
+
+-- Eğer tablo partisyonlu değilse ama bir partisyonu taşımak istiyorsanız (Subpartition vb.)
+ALTER TABLE SATIS_VERILERI 
+MOVE SUBPARTITION SP_2023_OCAK_ANTALYA 
+TABLESPACE TS_SLOW_DISK;
+```
+
+---
+
+## 2. İndekslerin Durumu (Unusable Indexes)
+
+Partisyon taşıma işlemi sonrasında, o partisyona bağlı olan **Global İndeksler** veya **değişmeyen Local İndeksler** `UNUSABLE` durumuna düşebilir. Taşıma sırasında `UPDATE INDEXES` eklemek bu sorunu önler:
+
+```sql
+ALTER TABLE SATIS_VERILERI 
+MOVE PARTITION P_2023_OCAK 
+TABLESPACE TS_ARCHIVE_2023 
+UPDATE INDEXES;
+```
+
+Eğer eklemediyseniz, geçersiz indeksleri şu şekilde bulup rebuild etmeniz gerekir:
+
+```sql
+SELECT index_name, status 
+FROM dba_ind_partitions 
+WHERE status = 'UNUSABLE';
+
+ALTER INDEX IX_SATIS_TARIH REBUILD PARTITION P_2023_OCAK;
+```
+
+---
+
+## 3. Partisyon İsimlerini Sorgulama ve Analiz
+
+Hangi partisyonun ne kadar yer kapladığını ve isim formatlarını analiz etmek için:
+
+```sql
+SELECT partition_name, high_value, tablespace_name, num_rows
+FROM dba_tab_partitions
+WHERE table_name = 'SATIS_VERILERI'
+ORDER BY partition_position DESC;
+```
+
+---
+
+## 4. Partisyon Bazlı Veri Arşivleme (Exchange Partition)
+
+En hızlı veri taşıma/arşivleme yöntemi `EXCHANGE PARTITION` tekniğidir. Bu işlem veriyi fiziksel olarak taşımaz, sadece veri sözlüğündeki (data dictionary) işaretçileri değiştirir.
+
+```sql
+-- 1. Hedef tabloyu (boş) oluşturun
+CREATE TABLE SATIS_2022_ARSIV AS SELECT * FROM SATIS_VERILERI WHERE 1=0;
+
+-- 2. Değiş-tokuş işlemini yapın (Saniye sürer!)
+ALTER TABLE SATIS_VERILERI 
+EXCHANGE PARTITION P_2022_YILI 
+WITH TABLE SATIS_2022_ARSIV 
+WITHOUT VALIDATION;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Online İşlemler:** Oracle 12c ve sonrasında `MOVE PARTITION ... ONLINE` komutu ile kullanıcılar tabloyu sorgulamaya devam ederken taşıma yapabilirsiniz.
+-   **Compression:** Eski partisyonları taşırken aynı zamanda sıkıştırarak (`ROW STORE COMPRESS ADVANCED`) diskten tasarruf edebilirsiniz.
+-   **İsimlendirme:** Partisyon isimlerinin tarih içermesi (örn: P_202401) yönetim ve script yazımını kolaylaştırır.
+
+Doğru partisyon stratejisi, sadece performansı değil, aynı zamanda veritabanı depolama maliyetlerinizi de optimize eder.

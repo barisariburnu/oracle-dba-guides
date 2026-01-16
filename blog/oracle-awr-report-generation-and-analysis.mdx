@@ -1,0 +1,79 @@
+---
+title: "Oracle AWR Raporu: Oluşturma ve Performans Analizi Rehberi"
+description: "Oracle veritabanında Automatic Workload Repository (AWR) raporu nasıl oluşturulur? Snapshot yönetimi, rapor türleri ve AWR raporu okuma teknikleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle AWR", "Performance Tuning", "Snapshot", "AWR Report", "DBA Tasks", "SQL Analysis"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle AWR Raporu: Oluşturma ve Performans Analizi Rehberi
+
+Oracle veritabanlarında performans sorunlarını gidermek (troubleshooting) dendiğinde akla gelen ilk araç **AWR (Automatic Workload Repository)** raporudur. AWR, veritabanının belirli iki zaman dilimi (snapshot) arasındaki performans istatistiklerini toplayan ve bunları anlamlı bir HTML veya Text raporu olarak sunan yerleşik bir mekanizmadır. Bu makalede, bir AWR raporunun nasıl oluşturulacağını ve nelere dikkat edilmesi gerektiğini adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. AWR Raporu Nasıl Oluşturulur?
+
+AWR raporu oluşturmak için veritabanı sunucusuna SSH ile bağlanıp `sqlplus` üzerinden Oracle'ın sunduğu standart scriptleri çalıştırmanız yeterlidir.
+
+### Adım 1: SQL*Plus Bağlantısı ve Scripti Çalıştırma
+```bash
+sqlplus / as sysdba
+SQL> @?/rdbms/admin/awrrpt.sql
+```
+*Not: `?` işareti `$ORACLE_HOME` dizinini temsil eder.*
+
+### Adım 2: Rapor Formatını Seçme
+Script size raporun formatını soracaktır (`html` veya `text`). Genellikle görsellik ve okunabilirlik açısından `html` tercih edilir.
+
+### Adım 3: Snapshot Listesi ve Seçimi
+Sistem size son birkaç güne ait snapshot listesini getirecektir.
+-   **Begin Snapshot ID:** Sorunun başladığı andaki Snapshot numarası.
+-   **End Snapshot ID:** Sorunun bittiği veya analizin sona erdiği andaki Snapshot numarası.
+
+### Adım 4: Dosya Adı Belirleme
+Raporun kaydedileceği dosya adını (örn: `awr_report_2024.html`) girin. İşlem bittiğinde dosya bulunduğunuz dizine kaydedilecektir.
+
+---
+
+## 2. AWR Manuel Snapshot Alma
+
+Normalde Oracle her saat başı otomatik snapshot alır. Ancak anlık bir sorunu yakalamak için manuel olarak da snapshot tetikleyebilirsiniz:
+
+```sql
+BEGIN
+  DBMS_WORKLOAD_REPOSITORY.CREATE_SNAPSHOT();
+END;
+/
+```
+
+---
+
+## 3. Farklı AWR Rapor Türleri
+
+Sistemin ihtiyacına göre farklı AWR scriptleri kullanılabilir:
+
+-   **awrrpt.sql:** Standart single-instance raporu.
+-   **awrgrpt.sql:** RAC (Global) ortamlar için tüm instance'ları kapsayan rapor.
+-   **awri rpt.sql:** Belirli bir SQL_ID üzerine odaklanmış AWR raporu.
+-   **awrddrpt.sql:** İki farklı zaman dilimi arasındaki farkı (Compare) gösteren rapor.
+
+---
+
+## 4. AWR Raporunda İzlenmesi Gereken Kritik Bölümler
+
+Bir AWR raporu yüzlerce sayfa olabilir. Hızlı çözüm için şu bölümlere odaklanmalısınız:
+
+1.  **Load Profile:** Veritabanının saniyelik/dakikalık yükünü gösterir (Hard parses, Transactions vb.).
+2.  **Top 10 Foreground Wait Events:** Veritabanının neden beklediğini (I/O, Lock, Latch) söyler. En büyük paya sahip (Time) event asıl sorundur.
+3.  **SQL ordered by Elapsed Time:** En çok zaman harcayan SQL sorgularını listeler.
+4.  **Advisory Statistics:** Buffer Cache veya Shared Pool gibi bellek alanlarının artırılmasının performansa etkisini tahmin eder.
+
+## Özet ve En İyi Uygulamalar
+
+-   **Period Süresi:** AWR raporu için 1 saat idealdir. Çok uzun süreler (örn: 24 saat) veriyi "sulandırabilir" ve kısa süreli krizleri maskeleyebilir.
+-   **Karşılaştırma:** Sistemin yavaş olduğu bir AWR raporunu, normal çalıştığı bir zamana ait AWR raporuyla karşılaştırmak (`Diff Report`) en hızlı çözüm yöntemidir.
+-   **Kataloglama:** Kritik raporları sftp ile yerel bilgisayarınıza alıp arşivlemek, gelecekteki kapasite planlamaları için altın değerinde veri sağlar.
+
+AWR, veritabanınızın MR'ını çekmek gibidir. Doğru analiz edildiğinde, en karmaşık performans darboğazlarını saniyeler içinde gün yüzüne çıkarır.

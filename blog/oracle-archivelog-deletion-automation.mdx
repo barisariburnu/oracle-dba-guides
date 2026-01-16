@@ -1,0 +1,398 @@
+---
+title: "Oracle Archivelog Otomatik Silme Scripti - RMAN Automation"
+description: "Oracle archivelog otomatik silme scripti, RMAN deletion policy, crontab job oluşturma ve archivelog management best practices."
+date: 2025-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "archivelog", "rman", "automation", "crontab", "dba", "backup"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Archivelog Otomatik Silme Scripti - RMAN Automation
+
+Oracle veritabanlarında **archivelog** biriktikçe disk alanını doldurur ve veritabanını archivelog üretimi yapamaz hale getirir. Bu yazıda **RMAN ile otomatik archivelog silme** script'ini ve **crontab** ile otomasyonu detaylı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Archivelog silme işlemi yapmadan önce mutlaka backup'ta yedeği olduğunu doğrulayın. Yanlışlıkla gerekli log'ları silerseniz recovery yapılamaz.
+</Callout>
+
+## Script'in Amacı
+
+Bu script ile şu işlemler gerçekleştirilir:
+
+- **RMAN ile archivelog** silme
+- **Crosscheck** ile physcal varlık kontrolü
+- **Backup controlfile** otomasyonu
+- **Crontab** ile zamanlama
+- **Log dosyası** yönetimi
+
+## Önkoşullar
+
+1. **Archivelog mode** aktif olmalı
+2. **RMAN catalog** veya control file repository
+3. **Yeterli disk alanı** backup için
+4. **Linux/Unix** işletim sistemi (crontab için)
+
+## Shell Script - run_rman_script.sh
+
+### Ana Shell Script
+
+```bash
+#!/bin/bash
+# run_rman_script.sh - Oracle archivelog deletion script
+# Tarih: 2025-01-16
+# Amaç: 1 günden eski archivelog'ları sil
+
+# Environment variables
+export PATH=/usr/java5/jre/bin:/usr/bin:/etc:/usr/sbin:/usr/ucb:/usr/bin/X11/sbin:.
+export ORACLE_BASE=/oracle
+export ORACLE_UNQNAME=CBSPROD
+export AIXTHREAD_SCOPE=S
+export NUM_SPAREVP=1
+export TEMP=/tmp
+export TMP=/tmp
+export TMPDIR=/tmp
+umask 022
+
+# Oracle environment
+export ORACLE_HOME=/oracle/product/11.2.0/db
+export PATH=$ORACLE_HOME/bin:$ORACLE_HOME/OPatch:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$ORACLE_HOME/lib32
+export LIBPATH=$ORACLE_HOME/lib:$ORACLE_HOME/lib32
+export ORACLE_SID=ORCLDB
+export NLS_LANG=AMERICAN_AMERICA.WE8ISO8859P9
+
+# Log file timestamp
+LOG_DATE=$(date +%Y%m%d_%H%M%S)
+LOG_FILE=/oracle/backup_scripts/delete_arc_${LOG_DATE}.log
+
+# RMAN script'i çalıştır
+echo "Starting archivelog deletion at $(date)" >> $LOG_FILE
+rman cmdfile /oracle/backup_scripts/delete_archivelog.rman log $LOG_FILE
+echo "Archivelog deletion completed at $(date)" >> $LOG_FILE
+
+# Exit status kontrolü
+if [ $? -eq 0 ]; then
+  echo "RMAN script completed successfully" >> $LOG_FILE
+else
+  echo "RMAN script failed with exit code $?" >> $LOG_FILE
+  # Email gönder (opsiyonel)
+  # echo "Archivelog deletion failed. Check log: $LOG_FILE" | mail -s "RMAN Error" dba@company.com
+  exit 1
+fi
+```
+
+<Callout type="warning" title="Uyarı">
+Environment variables'ı kendi ortamınıza göre güncelleyin:
+- ORACLE_HOME
+- ORACLE_SID
+- ORACLE_BASE
+</Callout>
+
+## RMAN Script - delete_archivelog.rman
+
+### RMAN Deletion Script
+
+```rman
+# delete_archivelog.rman - RMAN archivelog deletion script
+# Tarih: 2025-01-16
+
+# Target database'e bağlan
+connect target /;
+
+# Deletion ve cleanup işlemleri
+run {
+  # 1. Archivelog'ların physical varlığını kontrol et
+  crosscheck archivelog all;
+
+  # 2. 1 günden eski archivelog'ları sil
+  #    (backup'ta yedeği varsa)
+  delete archivelog until time "sysdate - 1";
+
+  # 3. Obsolete backup'ları sil (opsiyonel)
+  # delete obsolete;
+
+  # 4. Expired backup'ları sil (opsiyonel)
+  # delete expired backup;
+}
+
+# Controlfile backup al (önlem amaçlı)
+sql "alter database backup controlfile to trace";
+
+# RMAN'den çık
+exit;
+```
+
+**Script Açıklaması:**
+
+1. **CROSSCHECK:** Archivelog'ların disk üzerinde fiziksel varlığını kontrol eder
+2. **DELETE UNTIL:** Belirtilen tarihten eski, backup'ta yedeği olan log'ları siler
+3. **CONTROLFILE BACKUP:** Önlem amaçlı controlfile backup'ı alır
+
+## Crontab Konfigürasyonu
+
+### Crontab Job Oluşturma
+
+```bash
+# Crontab edit
+crontab -e
+
+# Her gün 18:05'te çalışacak job
+05 18 * * * sh /oracle/backup_scripts/run_rman_script.sh
+
+# Çoklu zamanlama örnekleri:
+# Her saat başı:
+0 * * * * sh /oracle/backup_scripts/run_rman_script.sh
+
+# Her 6 saatte bir:
+0 */6 * * * sh /oracle/backup_scripts/run_rman_script.sh
+
+# Her Pazar gece yarısı:
+0 0 * * 0 sh /oracle/backup_scripts/run_rman_script.sh
+
+# Ayın 1'inde gece yarısı:
+0 0 1 * * sh /oracle/backup_scripts/run_rman_script.sh
+```
+
+### Mevcut Crontab'ı Listeleme
+
+```bash
+# Mevcut crontab job'larını görüntüle
+crontab -l
+
+# Çıktı:
+# 05 18 * * * sh /oracle/backup_scripts/run_rman_script.sh
+```
+
+## RMAN Deletion Policy Alternatifleri
+
+### Senaryo 1: Gün Bazlı Silme
+
+```rman
+# Son 7 günü koru, diğerlerini sil
+run {
+  crosscheck archivelog all;
+  delete archivelog until time "sysdate - 7";
+}
+```
+
+### Senaryo 2: SCN Bazlı Silme
+
+```rman
+# Belirli SCN'den önceki log'ları sil
+run {
+  crosscheck archivelog all;
+  delete archivelog until scn 123456789;
+}
+```
+
+### Senaryo 3: Sequence Bazlı Silme
+
+```rman
+# Belirli sequence numarasından öncekileri sil
+run {
+  crosscheck archivelog all;
+  delete archivelog until sequence 50000;
+}
+```
+
+### Senaryo 4: Backup Control with RMAN Policy
+
+```rman
+# RMAN retention policy'ine göre silme
+CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 7 DAYS;
+
+# Policy'ye göre sil
+run {
+  crosscheck archivelog all;
+  delete archivelog all;
+  delete obsolete;
+}
+```
+
+## Kullanım Senaryoları
+
+### Senaryo 1: Manuel Çalıştırma
+
+```bash
+# Script'i manuel çalıştır
+sh /oracle/backup_scripts/run_rman_script.sh
+
+# Veya
+cd /oracle/backup_scripts
+./run_rman_script.sh
+
+# Log dosyasını kontrol et
+tail -f /oracle/backup_scripts/delete_arc_20250116_180500.log
+```
+
+### Senaryo 2: Test Öncesi Validation
+
+```bash
+# Silmeden önce ne kadar alan kazanacağınızı görün
+rman target / <<EOF
+crosscheck archivelog all;
+REPORT OBSOLETE;
+EXIT;
+EOF
+```
+
+### Senaryo 3: Acil Durum - Disk Dolu
+
+```bash
+# Acil durumda son 4 saati tutun ve diğerlerini silin
+rman target / <<EOF
+run {
+  crosscheck archivelog all;
+  delete archivelog until time "sysdate - 4/24";
+}
+EXIT;
+EOF
+```
+
+## Monitoring ve Alerting
+
+### Archivelog Disk Usage Monitor
+
+```sql
+-- Archivelog destination kullanımını kontrol et
+SELECT name,
+       space_limit / 1024 / 1024 / 1024 AS space_limit_gb,
+       space_used / 1024 / 1024 / 1024 AS space_used_gb,
+       space_reclaimable / 1024 / 1024 / 1024 AS space_reclaimable_gb,
+       ROUND(space_used / space_limit * 100, 2) AS pct_used
+FROM   v$recovery_file_dest;
+```
+
+**Çıktı:**
+
+```
+NAME               SPACE_LIMIT_GB  SPACE_USED_GB  SPACE_RECLAIMABLE_GB  PCT_USED
+----------------- --------------- -------------- --------------------- ----------
+/oracle/arch         500.00          450.00         100.00                90.00
+```
+
+### Archivelog Count Monitor
+
+```sql
+-- Archivelog sayısını ve disk kullanımını görüntüle
+SELECT COUNT(*) AS archivelog_count,
+       SUM(bytes) / 1024 / 1024 / 1024 AS total_size_gb,
+       MIN(completion_time) AS oldest_log,
+       MAX(completion_time) AS newest_log
+FROM   v$archived_log
+WHERE  deleted = 'NO';
+```
+
+### Alert Script
+
+```bash
+#!/bin/bash
+# archivelog_alert.sh - Disk alanı kontrol script'i
+
+# Threshold %80 olarak ayarla
+THRESHOLD=80
+
+# Kullanım oranını al
+USAGE=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT ROUND(space_used / space_limit * 100, 0)
+FROM   v\$recovery_file_dest;
+EXIT;
+EOF
+)
+
+# Threshold'u aşarsa alert
+if [ $USAGE -gt $THRESHOLD ]; then
+  echo "WARNING: Archivelog destination is ${USAGE}% full" | \
+  mail -s "Archivelog Space Alert" dba@company.com
+fi
+```
+
+## Best Practices
+
+### 1. Retention Policy
+
+```rman
+-- Recovery window based policy
+CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 7 DAYS;
+
+-- Redundancy based policy
+CONFIGURE RETENTION POLICY TO REDUNDANCY 3;
+
+-- Backup optimization
+CONFIGURE BACKUP OPTIMIZATION ON;
+```
+
+### 2. Backup Validation
+
+```rman
+-- Archivelog silmeden önce backup al
+run {
+  backup archivelog all;
+  delete archivelog until time "sysdate - 1";
+}
+```
+
+### 3. Log Rotation
+
+```bash
+# Eski log dosyalarını temizle
+find /oracle/backup_scripts -name "delete_arc_*.log" -mtime +30 -delete
+```
+
+### 4. Multi-Destination Archivelog
+
+```sql
+-- Multiple archivelog destination
+ALTER SYSTEM SET log_archive_dest_1='LOCATION=/oracle/arch1 MANDATORY';
+ALTER SYSTEM SET log_archive_dest_2='LOCATION=/oracle/arch2 OPTIONAL';
+```
+
+## Troubleshooting
+
+### Sorun 1: RMAN-08137: WARNING: archive log not deleted
+
+**Hata:** Archivelog silinemiyor
+
+**Çözüm:**
+```rman
+-- Gerekli log olup olmadığını kontrol et
+LIST ARCHIVELOG ALL;
+
+-- Backup durumunu kontrol et
+REPORT OBSOLETE;
+
+-- Zorla silme (riskli!)
+DELETE FORCE ARCHIVELOG UNTIL SEQUENCE 50000;
+```
+
+### Sorun 2: Disk Alanı Yetersiz
+
+```bash
+# Acil durumda archivelog'ları farklı diske taşı
+mv /oracle/arch/*.arc /backup/temp_arch/
+
+# Veya compress edin
+gzip /oracle/arch/*.arc
+```
+
+### Sorun 3: Crontab Çalışmıyor
+
+```bash
+# Crontab log'u kontrol et
+grep CRON /var/log/syslog
+
+# Environment sorunları için full path kullan
+05 18 * * * /bin/sh /oracle/backup_scripts/run_rman_script.sh
+```
+
+## İlgili Kaynaklar
+
+- [RMAN Archivelog Management](https://docs.oracle.com/en/database/oracle/oracle-database/19/bradv/managing-backups-with-rman.html)
+- [DELETE Command Reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/bradv/RMAN-DELETE.html)
+- [Crontab Documentation](https://linux.die.net/man/5/crontab)
+
+Bu yazıda archivelog otomatik silme işlemlerini öğrendiniz. Diğer RMAN management konuları için blog yazılarımızı takip edin.

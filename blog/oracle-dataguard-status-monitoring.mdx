@@ -1,0 +1,370 @@
+---
+title: "Oracle Data Guard Process Monitoring ile Replication Takibi"
+description: "Data Guard MRP, RFS ve LGWR process durumlarını izleme, log shipping'i kontrol etme ve replication sağlığını doğrulama rehberi."
+date: 2026-01-16
+category: "Oracle Data Guard"
+tags: ["oracle", "data guard", "replication", "mrp", "rfs", "standby", "monitoring"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Process Monitoring ile Replication Takibi
+
+Oracle Data Guard ortamlarında en kritik görevlerden biri, replication process'lerinin sağlıklı çalıştığını doğrulamaktır. Bu makalede, Data Guard process monitoring için kullanışlı SQL sorguları sunacağım.
+
+
+<!--truncate-->
+## Data Guard Process Monitoring Önemi
+
+Data Guard process'lerini düzenli izlemek şunları sağlar:
+
+- Log shipping'in başarılı çalıştığını doğrular
+- Standby veritabanının güncel kalmasını garanti eder
+- Replication lag'ı tespit eder
+- Process sorunlarını proaktif olarak belirler
+- Disaster recovery hazırlığını garanti altına alır
+
+<Callout type="warning" title="Kritik Uyarı">
+Data Guard replication'ın durması, standby veritabanının güncelliğini kaybetmesine neden olur. Disaster senaryosunda veri kaybı yaşanabilir.
+</Callout>
+
+## Script Özellikleri
+
+Bu monitoring scripti şu bilgileri sağlar:
+
+- MRP (Managed Recovery Process) durumu
+- RFS (Remote File Server) process durumları
+- LGWR (Log Writer) process bilgileri
+- Thread ve sequence numaraları
+- Process status bilgileri
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- Data Guard yapılandırılmış olmalı
+- Standby veritabanında SYSDBA yetkisi
+- `V$MANAGED_STANDBY` view'ine erişim
+
+## Script İçeriği
+
+```sql
+set line 2000
+set pagesize 2000
+
+SELECT process,
+       client_process,
+       thread#,
+       sequence#,
+       status
+FROM v$managed_standby
+ORDER BY process, client_process;
+
+exit
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama | Örnek Değerler |
+|-------|----------|----------------|
+| **PROCESS** | Process adı | MRP0, RFS, LGWR |
+| **CLIENT_PROCESS** | Client process adı | LGWR, ARCH, UNKNOWN |
+| **THREAD#** | Thread numarası (RAC) | 1, 2, 3 |
+| **SEQUENCE#** | Sequence numarası | 12345, 12346 |
+| **STATUS** | Process durumu | ATTACHED, IDLE, APPLYING_LOG |
+
+## Kullanım
+
+```bash
+sqlplus / as sysdba @dg_durum_process.sql
+```
+
+## Örnek Çıktı
+
+```
+PROCESS CLIENT_PROCESS  THREAD#  SEQUENCE# STATUS
+------- --------------- ------- ---------- -------------
+MRP0    N/A                   1      54321 APPLYING_LOG
+RFS     LGWR                   1      54322 IDLE
+RFS     ARCH                   1      54321 IDLE
+RFS     LGWR                   2      32112 IDLE
+```
+
+## Process Türleri ve Açıklamaları
+
+### MRP0 (Managed Recovery Process)
+
+- **Açıklama**: Standby veritabanında redo log apply işlemini yönetir
+- **Durumlar**:
+  - `APPLYING_LOG`: Log apply işlemi aktif
+  - `IDLE`: Apply edilecek log bekliyor
+  - `ERROR`: Hata durumunda
+
+<Callout type="info" title="İpucu">
+MRP0 process'i her zaman çalışmalıdır. Eğer STATUS = ERROR görürseniz, alarm oluşturmalısınız.
+</Callout>
+
+### RFS (Remote File Server)
+
+- **Açıklama**: Primary'den gelen redo log'ları alır
+- **Durumlar**:
+  - `IDLE`: Yeni redo log bekliyor
+  - `ATTACHED`: Primary'ye bağlı
+  - `WRITING`: Log yazıyor
+
+### LGWR (Log Writer)
+
+- **Açıklama**: Primary'de redo log yazma işlemini yönetir
+- Standby'de görünmez (sadece RFS görünür)
+
+## Gelişmiş Monitoring Sorguları
+
+### Detaylı Process Durumu
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT process,
+       client_process,
+       thread#,
+       sequence#,
+       block#,
+       blocks,
+       delay_mins,
+       status
+FROM v$managed_standby
+ORDER BY process, thread#;
+```
+
+### Apply Lag Kontrolü
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT thread#,
+       sequence#,
+       TO_CHAR(next_time, 'YYYY-MM-DD HH24:MI:SS') next_time,
+       applied,
+       ROUND((SYSDATE - next_time) * 24 * 60, 2) AS lag_minutes
+FROM v$archived_log
+WHERE applied = 'YES'
+  AND sequence# = (SELECT MAX(sequence#) FROM v$archived_log WHERE applied = 'YES')
+ORDER BY thread#;
+```
+
+### Redo Apply Hızı
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT thread#,
+       sequence#,
+       block#,
+       blocks,
+       ROUND(blocks / 1024, 2) AS blocks_kb,
+       ROUND(blocks / (SYSDATE - last_change_time) / 1024, 2) AS apply_rate_kb_per_sec
+FROM v$managed_standby
+WHERE process = 'MRP0'
+ORDER BY thread#;
+```
+
+### Primary-Standby Sync Durumu
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+-- Primary'de çalıştırın
+SELECT MAX(sequence#) current_sequence
+FROM v$log
+ORDER BY thread#;
+
+-- Standby'de çalıştırın
+SELECT MAX(sequence#) applied_sequence
+FROM v$archived_log
+WHERE applied = 'YES';
+
+-- Aradaki fark Data Guard gap'tir
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Data Guard Check
+
+Her gün replication durumunu kontrol edin:
+
+```bash
+#!/bin/bash
+# dg_check.sh
+
+echo "=== Standby Database Process Status ==="
+sqlplus -s / as sysdba @dg_durum_process.sql
+
+echo "=== Apply Lag Check ==="
+sqlplus -s / as sysdba <<EOF
+SELECT thread#,
+       ROUND((SYSDATE - MAX(next_time)) * 24 * 60, 2) AS lag_minutes
+FROM v\$archived_log
+WHERE applied = 'YES'
+GROUP BY thread#;
+EOF
+```
+
+### 2. Gap Tespiti
+
+Standby'in primary'den ne kadar geride olduğunu kontrol edin:
+
+```sql
+-- Standby'de çalıştırın
+WITH primary AS (
+  SELECT MAX(sequence#) AS max_seq
+  FROM v$archived_log
+),
+standby AS (
+  SELECT MAX(sequence#) AS max_applied_seq
+  FROM v$archived_log
+  WHERE applied = 'YES'
+)
+SELECT p.max_seq - s.max_applied_seq AS gap_sequence
+FROM primary p, standby s;
+```
+
+### 3. Process Failure Alarmı
+
+```bash
+#!/bin/bash
+# dg_alarm.sh
+
+MRP_STATUS=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT status FROM v\$managed_standby WHERE process = 'MRP0' AND ROWNUM = 1;
+EOF
+)
+
+if [ "$MRP_STATUS" != "APPLYING_LOG" ] && [ "$MRP_STATUS" != "IDLE" ]; then
+    echo "ALARM: MRP0 process status is $MRP_STATUS"
+    mail -s "Data Guard MRP Alarm" dba@company.com
+fi
+```
+
+### 4. Real-time Apply Durumu
+
+```sql
+-- Standby'de çalıştırın
+SELECT database_role,
+       open_mode,
+       protection_mode,
+       protection_level,
+       flashback_on
+FROM v$database;
+
+-- open_mode = READ ONLY WITH APPLY ise Active Data Guard aktiftir
+```
+
+## Troubleshooting
+
+### Sorun: MRP0 Process Yok
+
+**Çözüm:**
+
+```sql
+-- MRP process'ini başlatın
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+```
+
+### Sorun: RFS Process Durumunda IDLE ve Yeni Sequence Gelmiyor
+
+**Çözüm Adımları:**
+
+1. Primary'de log switch yapın:
+   ```sql
+   ALTER SYSTEM SWITCH LOGFILE;
+   ```
+
+2. Network bağlantısını kontrol edin:
+   ```bash
+   ping <standby_host>
+   telnet <standby_host> 1521
+   ```
+
+3. Standby'de alert log'u kontrol edin:
+   ```bash
+   # alert log lokasyonu
+   $ORACLE_BASE/diag/rdbms/<DB_NAME>/<SID>/trace/alert_<SID>.log
+   ```
+
+### Sorun: Gap Tespit Edildi
+
+**Çözüm:**
+
+```sql
+-- 1. Gap'ı tespit edin
+SELECT * FROM v$archive_gap;
+
+-- 2. Eksik archivelog'ları primary'den kopyalayın
+-- 3. Standby'de register edin
+ALTER DATABASE REGISTER PHYSICAL LOGFILE '/path/to/archivelog';
+
+-- 4. MRP'yi restart edin
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+```
+
+## Data Guard Broker Kullanımı
+
+Eğer Data Guard Broker kullanıyorsanız:
+
+```bash
+# DGMGRL ile durum kontrolü
+dgmgrl sys/password
+
+DGMGRL> show configuration;
+DGMGRL> show database <db_name>;
+```
+
+## İlgili Görünümler
+
+- `V$MANAGED_STANDBY` - Standby process'leri
+- `V$ARCHIVED_LOG` - Archived log bilgileri
+- `V$ARCHIVE_GAP` - Gap bilgileri
+- `V$DATAGUARD_STATS` - Data Guard istatistikleri
+- `V$RECOVERY_PROGRESS` - Recovery progress
+
+## Best Practices
+
+### 1. Monitoring Frekansı
+
+- **Critical**: Her 5 dakikada bir otomatik kontrol
+- **Important**: Günlük manuel kontrol
+- **Routine**: Haftalık detaylı analiz
+
+### 2. Alert Kuralları
+
+- **Kritik**: MRP0 process yok veya ERROR durumunda
+- **Uyarı**: Apply lag &gt; 15 dakika
+- **Bilgi**: Gap tespit edildi
+
+### 3. Dokümantasyon
+
+- Normal process durumlarını not edin
+- Baseline oluşturun
+- Anomalileri hızlıca tespit edin
+
+## Kaynaklar
+
+- Oracle Data Guard Broker Guide
+- Oracle Data Guard Concepts and Administration
+- MAA (Maximum Availability Architecture) Best Practices
+
+## Sonraki Adımlar
+
+Bu Data Guard process monitoring scripti ile şunları yapabilirsiniz:
+
+- Otomatik alarm sistemi entegrasyonu
+- Apply trend analizi
+- Predictive lag analizi
+- Multi-site monitoring dashboard
+- Automated failover decision support
+
+Data Guard monitoring, disaster recovery stratejinin en önemli parçasıdır. Bu scriptleri düzenli kullanarak replication'ınızın sağlığını garanti altına alabilirsiniz.

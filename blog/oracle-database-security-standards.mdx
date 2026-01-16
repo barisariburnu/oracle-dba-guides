@@ -1,0 +1,79 @@
+---
+title: "Oracle Veritabanı Güvenlik Standartları: Kullanıcılar, Yetkiler ve Sıkılaştırma"
+description: "Oracle veritabanında güvenlik sıkılaştırma (Hardening) adımları, varsayılan şifrelerin kontrolü, kritik yetki analizleri ve güvenlik denetim listesi."
+date: "2026-01-16"
+category: "Güvenlik"
+tags: ["Oracle Security", "Hardening", "Auditing", "DBA", "Password Policy", "Compliance"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Güvenlik Standartları ve Sıkılaştırma
+
+Veritabanı güvenliği, sadece bir güvenlik duvarı (Firewall) arkasına saklanmak değildir. İçeriden gelebilecek tehditlere, zayıf şifrelere ve gereksiz yetki tanımlarına karşı veritabanını sıkılaştırmak (Hardening) bir DBA'in en kritik sorumluluklarındandır.
+
+
+<!--truncate-->
+Bu makalede, Oracle veritabanınızı daha güvenli hale getirmek için yapmanız gereken temel güvenlik kontrollerini inceleyeceğiz.
+
+## 1. Varsayılan Şifrelerin Kontrolü
+
+Oracle kurulumuyla gelen birçok kullanıcı (`SYS`, `SYSTEM`, `DBSNMP`, `OUTLN` vb.) varsayılan şifrelerle bırakılmış olabilir. Bu, saldırganlar için açık bir kapıdır.
+
+```sql
+-- Varsayılan şifresi değişmemiş kullanıcıları tespit etme (Eski sürümler için)
+SELECT username, account_status
+FROM dba_users
+WHERE password IN ('MANAGER', 'CHANGE_ON_INSTALL', 'DBSNMP', 'OUTLN');
+```
+*Not: Yeni sürümlerde Oracle, varsayılan şifreleri kurulum sırasında zorunlu olarak değiştirtmektedir.*
+
+---
+
+## 2. Kritik Yetki ve Rol Analizi
+
+Gereksiz yere verilen `DBA` rolü veya `ANY` ile başlayan (GRANT CREATE ANY TABLE vb.) yetkiler, güvenlik riskini artırır.
+
+### DBA Rolüne Sahip Kullanıcıları Listeleme
+```sql
+SELECT grantee, granted_role, admin_option
+FROM dba_role_privs
+WHERE granted_role = 'DBA';
+```
+
+### PUBLIC Yetkilerini İnceleme
+`PUBLIC` grubuna verilen yetkiler veritabanındaki tüm kullanıcılar tarafından kullanılabilir. Buradaki kritik yetkileri (örn: UTL_FILE, UTL_HTTP) kısıtlamak önemlidir.
+
+---
+
+## 3. Parola Politikası ve Profil Yönetimi
+
+Kullanıcıların şifrelerinin belirli bir karmaşıklıkta olmasını ve belirli aralıklarla değiştirilmesini zorunlu kılmalısınız.
+
+```sql
+ALTER PROFILE DEFAULT LIMIT
+  PASSWORD_LIFE_TIME 90          -- 90 günde bir şifre değişimi
+  PASSWORD_GRACE_TIME 7          -- Şifre dolduğunda 7 gün ek süre
+  PASSWORD_REUSE_TIME 365        -- Aynı şifre 1 yıl kullanılamaz
+  FAILED_LOGIN_ATTEMPTS 3        -- 3 hatalı girişte hesap kilitlenir
+  PASSWORD_VERIFY_FUNCTION verify_function; -- Karmaşıklık kontrolü
+```
+
+---
+
+## 4. Kullanılmayan Özellikleri Kapatma
+
+Eğer kullanmıyorsanız, veritabanındaki bazı özellikleri/kullanıcıları kapatmak saldırı yüzeyini azaltır.
+
+```sql
+-- Örnek: Demo kullanıcılarını kilitle
+ALTER USER SCOTT ACCOUNT LOCK;
+ALTER USER HR ACCOUNT LOCK;
+```
+
+## Özet ve Güvenlik İpuçları
+
+-   **En Az Yetki Prensibi (Least Privilege):** Bir kullanıcıya sadece işini yapabileceği kadar yetki verin. Asla "kolaylık olsun" diye DBA yetkisi dağıtmayın.
+-   **Denetleme (Auditing):** Kritik tablolar üzerindeki işlemleri ve hatalı giriş denemelerini mutlaka `AUDIT` komutuyla takip edin.
+-   **Yamalar:** Güvenlik açıklarından korunmak için en son `PSU` veya `RU` yamalarını vakit kaybetmeden uygulayın.
+
+Güvenlik, bir varış noktası değil, sürekli devam eden bir süreçtir. Periyodik güvenlik taramaları ile veritabanınızı güncel tehditlere karşı koruyun.

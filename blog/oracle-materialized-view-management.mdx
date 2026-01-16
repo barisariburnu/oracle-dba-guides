@@ -1,0 +1,79 @@
+---
+title: "Oracle Materialized View (MView) Yönetimi ve Refresh Stratejileri"
+description: "Oracle veritabanında Materialized View kullanımı, yenileme (Refresh) yöntemleri ve MView grupları ile veri senkronizasyonu."
+date: "2026-01-16"
+category: "Geliştirme"
+tags: ["Oracle", "Materialized View", "MView", "Refresh", "Replication", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Materialized View (MView) Yönetimi
+
+**Materialized View (MView)**, bir sorgunun sonucunun fiziksel olarak bir tabloda saklanmış halidir. Standart görünümlerden (View) farkı, verilerin her çağrıldığında değil, önceden hesaplanıp diskte tutulmasıdır. Bu, özellikle karmaşık analitik sorgularda muazzam bir performans artışı sağlar.
+
+
+<!--truncate-->
+Bu makalede, MView'ların yönetimi ve yenileme (Refresh) stratejilerini inceleyeceğiz.
+
+## 1. MView Refresh Türleri
+
+MView'lar verinin ne kadar güncel olması gerektiğine göre farklı yöntemlerle yenilenebilir:
+
+-   **FAST Refresh:** Sadece ana tabloda değişen kayıtları (Loglar üzerinden) günceller. Çok hızlıdır.
+-   **COMPLETE Refresh:** Tüm MView içeriğini silip sorguyu baştan çalıştırır.
+-   **FORCE Refresh:** Önce FAST denir, mümkün değilse COMPLETE yapar.
+
+### MView Log Oluşturma (Fast Refresh İçin Şart)
+```sql
+CREATE MATERIALIZED VIEW LOG ON SATISLAR 
+WITH PRIMARY KEY, ROWID, SEQUENCE (URUN_ID, TUTAR) INCLUDING NEW VALUES;
+```
+
+---
+
+## 2. Manuel ve Otomatik Yenileme
+
+MView'ları ihtiyacınıza göre manuel tetikleyebilir veya bir periyoda bağlayabilirsiniz.
+
+```sql
+-- Manuel Refresh
+BEGIN
+  DBMS_MVIEW.REFRESH('MVIEW_SATIS_OZET', method => 'F'); -- 'F' for Fast
+END;
+/
+```
+
+### MView Grupları (Refresh Groups)
+Birden fazla MView'ı aynı anda ve tutarlı (consistent) bir şekilde yenilemek için **Refresh Group** oluşturabilirsiniz:
+
+```sql
+BEGIN
+   DBMS_REFRESH.MAKE(
+     name => 'MRP_GRUP_1',
+     list => 'MVIEW_ABONE, MVIEW_FATURA, MVIEW_ODEME',
+     next_date => SYSDATE,
+     interval => 'SYSDATE + 1/24' -- Saatte bir
+   );
+END;
+/
+```
+
+---
+
+## 3. MView Durumunu İzleme
+
+Hangi MView'ın en son ne zaman yenilendiğini ve bir sonraki yenileme zamanını şu sorguyla görebilirsiniz:
+
+```sql
+SELECT owner, mview_name, last_refresh_date, last_refresh_type, staleness
+FROM dba_mviews
+WHERE owner = 'BI_USER';
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Staleness:** `STALENESS` kolonu `FRESH` değilse, MView ile ana tablo arasındaki veri uyumu bozulmuş demektir.
+-   **Index Kullanımı:** MView'lar fiziksel tablo oldukları için üzerlerine Query Rewrite özelliğinden faydalanmak üzere ek indeksler tanımlayabilirsiniz.
+-   **Query Rewrite:** Uygulama ana tabloyu sorgularken Oracle'ın otomatik olarak MView'ı kullanmasını istiyorsanız `ENABLE QUERY REWRITE` özelliğini aktif edin.
+
+Materialized Viewlar, raporlama ve veri ambarı sistemlerinde performansın temel taşıdır. Doğru refresh stratejisi ile hem sistem yükünü azaltır hem de raporların saniyeler içinde çalışmasını sağlarsınız.

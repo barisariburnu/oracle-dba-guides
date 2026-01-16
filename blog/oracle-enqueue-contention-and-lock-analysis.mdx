@@ -1,0 +1,64 @@
+---
+title: "Oracle Gelişmiş Sorun Giderme: Enqueue (HW, TM) Beklemeleri ve Kilit Analizi"
+description: "Oracle veritabanında enq: HW - contention, enq: TM - contention gibi bekleme olaylarının nedenleri ve RowID üzerinden kilitli satırların tespiti."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle", "Troubleshooting", "Enqueue", "Locking", "Wait Events", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Gelişmiş Sorun Giderme: Enqueue Beklemeleri ve Kilit Analizi
+
+Veritabanı performansını izlerken karşımıza çıkan "enq: ..." ile başlayan bekleme olayları (wait events), genellikle bir kaynağın paylaşımı sırasındaki rekabeti temsil eder. Bu beklemeleri doğru analiz etmek, sistemdeki darboğazı çözmenin anahtarıdır. En sık karşılaşılan iki `enqueue` türü olan **HW (High Water Mark)** ve **TM (Table Mount/DML)** beklemelerini inceleyelim.
+
+
+<!--truncate-->
+## 1. enq: HW - Contention (High Water Mark Çekişmesi)
+
+Bu bekleme olayı, bir tabloya çok yoğun veri girişi yapıldığında ve Oracle yeni alan (extent) allocate etmeye çalışırken oluşur. Özellikle LOB (Large Object) kolonları olan tablolarda sık görülür.
+
+### Sebebi ve Çözümü
+Eğer `v$active_session_history` sorgusunda `P3` değeri üzerinden LOB segmentine ulaşıyorsanız, LOB segmentinin `chunk` boyutunu veya `extent` yönetimini güncellemeniz gerekebilir:
+
+```sql
+-- Hangi objede çekişme olduğunu bulma (P3 = File ID * Blok ID)
+SELECT owner, segment_name, segment_type 
+FROM dba_extents 
+WHERE file_id = &P1 AND &P2 BETWEEN block_id AND block_id + blocks - 1;
+
+-- Çözüm: LOB segmenti için manuel extent allocate etme (Önleyici)
+ALTER TABLE MUSTERI_BELGELERI MODIFY LOB (TARANMIS_DOSYA) (ALLOCATE EXTENT (SIZE 1024M));
+```
+
+---
+
+## 2. enq: TM - Contention (DML Kilitleme Beklemesi)
+
+TM kilitleri, DML işlemleri sırasında tablonun yapısının değişmesini engellemek için konur. Eğer bu bekleme çok uzun sürüyorsa, genellikle **indekslenmemiş yabancı anahtarlar (unindexed foreign keys)** söz konusudur.
+
+### Analiz ve Tespit
+Anne-çocuk (Parent-Child) ilişkisi olan tablolarda, çocuk tablodaki FK kolonu indeksli değilse, her DML işleminde anne tablo seviyesinde kilit oluşur.
+
+---
+
+## 3. Kilitli Satırların RowID Üzerinden Tespiti
+
+Bir oturum başka bir oturumu kilitlediğinde, tam olarak hangi satırın (row) kilitli olduğunu bulmak için `v$session` içindeki `ROW_WAIT_OBJ#`, `ROW_WAIT_FILE#`, `ROW_WAIT_BLOCK#` ve `ROW_WAIT_ROW#` kolonlarını kullanabiliriz.
+
+```sql
+SELECT 
+   dbms_rowid.rowid_create(1, s.row_wait_obj#, s.row_wait_file#, s.row_wait_block#, s.row_wait_row#) as locked_rowid
+FROM v$session s 
+WHERE s.sid = &blocking_sid;
+
+-- Daha sonra bu RowID ile gerçek veriyi görebilirsiniz:
+-- SELECT * FROM table_name WHERE rowid = 'AAAA-BBBB-CCCC-DDDD';
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **FK İndeksleri:** Performans sorunlarının %80'i indekslenmemiş Foreign Key kolonlarından kaynaklanır. Mutlaka tüm FK'ları indeksleyin.
+-   **LOB Yönetimi:** Çok yoğun yazılan LOB kolonlarında `CACHE` ve `NOCACHE` ayarlarını, ayrıca `CHUNK` boyutunu iş yükünüze göre optimize edin.
+-   **Blok Seviyesi Rekabet:** Eğer aynı bloktaki farklı satırlara erişim sırasında beklemeler oluyorsa (`read by other session`), tablo üzerindeki `INITRANS` değerini artırmayı değerlendirin.
+
+Enqueue beklemeleri karmaşık görünebilir ancak her birinin arkasında teknik bir limit veya yapılandırma hatası vardır. P1, P2 ve P3 değerlerini takip ederek sorunun kaynağına saniyeler içinde inebilirsiniz.

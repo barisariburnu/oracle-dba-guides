@@ -1,0 +1,63 @@
+---
+title: "Oracle Exadata Kapama ve Açma Prosedürü: Adım Adım Rehber"
+description: "Oracle Exadata Database Machine tam kapatma ve başlatma (Power Off/On) adımları, Database Node ve Cell Node sıralaması, CRS yönetimi."
+date: "2026-01-16"
+category: "Exadata"
+tags: ["Oracle Exadata", "Shutdown Procedure", "Startup Procedure", "Database Node", "Cell Node", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Exadata Kapama ve Açma Prosedürü
+
+Oracle **Exadata**, karmaşık bir donanım ve yazılım bileşeni bütünüdür. Sistemin planlı bir bakım, elektrik kesintisi veya taşınma gibi durumlar için kapatılması gerektiğinde, doğru sıralamayı izlemek veri bütünlüğü ve sistem sağlığı açısından hayati önem taşır. Yanlış bir sıralama, disklerin "Syncing" durumunda uzun süre kalmasına veya Cluster (CRS) servislerinin düzgün başlamamasına neden olabilir. Bu makalede, bir Exadata makinesini güvenli bir şekilde kapatma ve açma adımlarını inceleyeceğiz.
+
+
+<!--truncate-->
+## Bölüm 1: Exadata Kapatma (Shutdown)
+
+Kapatma işlemi her zaman "Yukarıdan Aşağıya" (Uygulama -&gt; Veritabanı -&gt; Storage) doğru yapılmalıdır.
+
+### 1. Database Node'ların Kapatılması
+Her bir database node üzerinde şu adımları uygulayın:
+
+1.  **Veritabanlarını Durdurun:** `srvctl stop database -d db_adi`
+2.  **Cluster Servislerini (CRS) Durdurun:** `crsctl stop crs` (Root user ile).
+3.  **OSPM Process Kontrolü:** `ps -ef | grep d.bin` komutu ile arka plan süreçlerinin bittiğinden emin olun.
+4.  **Sunucuyu Kapatın:** `shutdown -h now` veya ILOM üzerinden Power Off yapın.
+
+### 2. Cell Node'ların Kapatılması
+Tüm database node'lar kapandıktan sonra cell'lere geçebilirsiniz:
+
+1.  **Disk Statüsü Kontrolü:** Disklerin `ONLINE` olduğundan emin olun.
+    `cellcli -e list griddisk attributes name, asmmodestatus`
+2.  **Cell Servislerini Durdurun:**
+    `cellcli -e alter cell shutdown services all`
+3.  **Sunucuyu Kapatın:** `shutdown -h now`
+
+---
+
+## Bölüm 2: Exadata Açma (Startup)
+
+Açma işlemi kapatmanın tam tersi, yani "Aşağıdan Yukarıya" (Storage -&gt; Cluster -&gt; Veritabanı) doğru yapılır.
+
+### 1. Cell Node'ların Başlatılması
+Storage katmanı hazır olmadan veritabanı katmanını başlatmamalısınız.
+
+1.  **Cell'leri Açın:** ILOM üzerinden tüm cell'lere Power On komutu verin.
+2.  **Servis Kontrolü:** `service celld status` ile servislerin çalıştığını teyid edin.
+3.  **Griddisk Senkronizasyonu:** Disklerin `SYNCING` durumundan `ONLINE` durumuna geçmesini bekleyin. Bu adım çok kritiktir; tüm diskler online olmadan veritabanı düğümlerini açmak hatalara neden olabilir.
+
+### 2. Database Node'ların Başlatılması
+1.  **Sunucuları Açın:** Tüm database sunucularını ILOM üzerinden başlatın.
+2.  **Cluster Kontrolü:** `crsctl stat res -t` komutu ile kaynakların (Diskgroup, VIP, Network) online olduğunu izleyin.
+3.  **Veritabanlarını Başlatın:** Eğer otomatik başlamadıysa `srvctl start database -d db_adi` ile başlatın.
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **ILOM Erişimi:** Fiziksel müdahale öncesi tüm node'ların ILOM (IPMI) erişiminin çalıştığından emin olun. Konsol erişimi sorun gidermede tek dostunuzdur.
+-   **Yedekleme:** Kapatma öncesi kritik yedeklerin (RMAN, Controlfile vb.) alındığını kontrol edin.
+-   **Kutu İçerisi Kontrol:** RAC ortamlarında kapatma/açma işlemleri sırasında alert logları (`tail -f`) izleyerek olası bir interconnect veya diskgroup montaj hatasını anında yakalayın.
+
+Doğru sıralama ile yönetilen bir Exadata makinesi, bakım sonrası çok daha hızlı ve sorunsuz bir şekilde ayağa kalkar.

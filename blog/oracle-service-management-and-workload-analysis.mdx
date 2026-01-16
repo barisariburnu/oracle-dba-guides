@@ -1,0 +1,119 @@
+---
+title: "Oracle Service Management: Workload Analizi ve Performans İzleme"
+description: "Oracle veritabanında servis tabanlı workload yönetimi, servis istatistikleri (gv$service_stats), RAC ortamında servis planlaması ve TAF yapılandırması."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Services", "Workload Analysis", "RAC", "TAF", "V$SERVICE_STATS", "Database Administration"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Service Management: Servis Tabanlı Workload Yönetimi
+
+Oracle veritabanında **Servisler (Services)**, uygulamaların veritabanına bağlanırken kullandığı mantıksal giriş kapılarıdır. Eskiden tüm uygulamalar varsayılan SID veya DB_NAME üzerinden bağlanırken, modern mimarilerde her modülün (Muhasebe, Satış, Raporlama) kendine özel bir servisi olması önerilir. Bu yaklaşım, DBA'ya hangi uygulamanın ne kadar kaynak tükettiğini görme ve RAC ortamında yükü farklı node'lara dağıtma imkanı verir. Bu makalede, servis istatistiklerini nasıl analiz edeceğinizi ve servis yönetimini inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Servis Kullanmalıyız?
+
+1.  **İzlenebilirlik:** `V$SERVICE_STATS` üzerinden hangi uygulamanın ne kadar CPU veya I/O tükettiğini görebilirsiniz.
+2.  **Yük Dengeleme (Load Balancing):** RAC ortamında belirli servisleri belirli instance'larda önceliklendirebilirsiniz.
+3.  **Hata Toleransı (High Availability):** TAF (Transparent Application Failover) yapılandırarak, bir instance çöktüğünde kullanıcıların diğerine otomatik geçmesini sağlayabilirsiniz.
+4.  **Resource Manager:** Servis bazlı CPU limitleri koyabilirsiniz.
+
+---
+
+## Servis İstatistikleri Analizi
+
+Sistemin toplam yükünün servisler arasındaki dağılımını yüzde (%) olarak görmek için:
+
+```sql
+SELECT service_name, 
+       ROUND(100 * (SUM(value) / (SELECT SUM(value) FROM v$service_stats WHERE stat_name = 'DB time')), 2) AS workload_pct
+FROM v$service_stats 
+WHERE stat_name = 'DB time'
+GROUP BY service_name 
+ORDER BY workload_pct DESC;
+```
+
+### Anlık Servis Metrikleri
+Hangi serviste kaç aktif oturum var ve ne bekliyorlar?
+```sql
+SELECT service_name,
+       COUNT(*) AS session_count,
+       SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active_sessions,
+       SUM(seconds_in_wait) AS total_wait_time
+FROM gv$session
+WHERE service_name IS NOT NULL
+GROUP BY service_name
+ORDER BY active_sessions DESC;
+```
+
+---
+
+## Servis Yönetimi (DBMS_SERVICE)
+
+Yeni bir servis oluşturmak ve yapılandırmak için `DBMS_SERVICE` paketi kullanılır.
+
+### 1. TAF Destekli Servis Oluşturma
+Bu servis, bir node çöktüğünde SQL sorgularının (SELECT) kesilmeden devam etmesini sağlar.
+```sql
+BEGIN
+  DBMS_SERVICE.CREATE_SERVICE(
+    service_name      => 'reporting_service',
+    network_name      => 'reporting_service.company.com',
+    failover_method   => 'BASIC',
+    failover_type     => 'SELECT',
+    failover_retries  => 180,
+    failover_delay    => 5
+  );
+END;
+/
+```
+
+### 2. Servis Başlatma ve Durdurma
+```sql
+-- Servisi aktif et
+EXEC DBMS_SERVICE.START_SERVICE('reporting_service');
+
+-- Servisi durdur
+EXEC DBMS_SERVICE.STOP_SERVICE('reporting_service');
+```
+
+---
+
+## RAC Ortamında Servis İzleme
+
+RAC (Real Application Clusters) kullanıyorsanız, servislerin hangi instance'larda `PRIMARY` (Tercih edilen) veya `AVAILABLE` (Yedek) olduğunu kontrol etmelisiniz.
+
+```sql
+SELECT name, 
+       network_name, 
+       creation_date,
+       failover_method,
+       failover_type
+FROM dba_services
+ORDER BY name;
+```
+
+### Servis Bazlı Ağ Trafiği
+Uygulamaların veritabanından çektiği veri miktarını analiz edin:
+```sql
+SELECT service_name, 
+       username, 
+       ROUND(SUM(bytes_sent)/1024/1024, 2) AS MB_Sent,
+       ROUND(SUM(bytes_received)/1024/1024, 2) AS MB_Received
+FROM v$session
+WHERE service_name IS NOT NULL
+GROUP BY service_name, username;
+```
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **Modüler Servisler:** Her uygulama veya ana modül için ayrı bir servis tanımlayın (örn: `APP_WEB`, `APP_MOBILE`, `APP_BATCH`).
+-   **Default Servisleri Kullanmayın:** `SYS$USERS` veya `DB_NAME` servislerini uygulama bağlantıları için kullanmaktan kaçının.
+-   **TAF Yapılandırması:** Raporlama servisleri için `failover_type => 'SELECT'` kullanarak kullanıcı deneyimini iyileştirin.
+-   **Monitoring:** Ayda bir kez servis bazlı workload raporu alarak kapasite planlaması yapın.
+
+Servis yönetimi, Oracle veritabanınızı bir "kara kutu" olmaktan çıkarıp, uygulama bazlı yönetilebilir bir platforma dönüştürür.

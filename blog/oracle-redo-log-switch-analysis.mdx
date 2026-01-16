@@ -1,0 +1,385 @@
+---
+title: "Oracle Redo Log Switch Frekans Analizi ve Optimizasyon"
+description: "Oracle redo log switch sıklığını analiz etme, günlük redo üretim miktarını hesaplama ve log boyutlandırma rehberi."
+date: 2026-01-16
+category: "Oracle Performans"
+tags: ["oracle", "redo log", "log switch", "performance", "tuning", "io"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Redo Log Switch Frekans Analizi ve Optimizasyon
+
+Oracle veritabanında redo log switch sıklığı, performans ve recovery süreleri üzerinde doğrudan etki eder. Bu makalede, redo log switch analizini ve optimizasyon stratejilerini kapsamlı bir şekilde inceleyeceğim.
+
+
+<!--truncate-->
+## Redo Log Switch Nedir?
+
+Redo log switch, redo log file'ının dolduğu anda Oracle'ın bir sonraki redo log group'a geçiş yapmasıdır. Bu süreç:
+
+- Checkpoint tetikler
+- Dirty buffer'ları diske yazar
+- Log writer process'i (LGWR) meşgul eder
+- I/O performansını etkiler
+
+<Callout type="warning" title="Performans Uyarısı">
+Saatte 20+ log switch olması, redo log boyutunun çok küçük olduğunu gösterir. Bu durum performans sorunlarına yol açabilir.
+</Callout>
+
+## Script Özellikleri
+
+Bu monitoring scripti şu analizleri sağlar:
+
+- Günlük redo log switch sayıları
+- Her gün için log switch trend'i
+- Günlük ortalama redo log üretim miktarı (GB cinsinden)
+- Son 30 günün historik verileri
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- SYSDBA yetkisi veya DBA role
+- `V$LOG_HISTORY` view'ine erişim
+- `V$LOG` view'ine erişim
+
+## Script İçeriği
+
+```sql
+set linesize 2000
+set pagesize 2000
+set feed off
+
+SELECT A.*,
+       ROUND(A.Count# * B.AVG# / 1024 / 1024 / 1024, 2) Daily_Avg_GB
+FROM (
+  SELECT TO_CHAR(First_Time, 'YYYY-MM-DD') DAY,
+         COUNT(1) Count#
+  FROM v$log_history
+  GROUP BY TO_CHAR(First_Time, 'YYYY-MM-DD')
+  ORDER BY 1 DESC
+) A,
+(
+  SELECT AVG(BYTES) AVG#,
+         COUNT(1) Count#,
+         MAX(BYTES) Max_Bytes,
+         MIN(BYTES) Min_Bytes
+  FROM v$log
+) B
+WHERE ROWNUM < 30;
+
+exit;
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama |
+|-------|----------|
+| **DAY** | Tarih (YYYY-MM-DD formatında) |
+| **COUNT#** | O günkü log switch sayısı |
+| **AVG#** | Ortalama redo log boyutu (bytes) |
+| **DAILY_AVG_GB** | Günlük ortalama redo üretimi (GB) |
+
+## Örnek Çıktı
+
+```
+DAY           COUNT#     AVG#       DAILY_AVG_GB
+------------- ---------- ---------- -------------
+2026-01-16          25  536870912           12.50
+2026-01-15          28  536870912           14.00
+2026-01-14          22  536870912           11.00
+2026-01-13          20  536870912           10.00
+2026-01-12          30  536870912           15.00
+```
+
+## Log Switch Frekans Analizi
+
+### Ideal Değerler
+
+| Switch/h Saat | Değerlendirme | Aksiyon |
+|---------------|---------------|---------|
+| 0-5 | İdeal | Mevcut durum iyi |
+| 5-10 | Kabul edilebilir | İzlemeye devam |
+| 10-20 | Sınırda | Büyütme düşünülebilir |
+| 20+ | Yüksek | Redo log büyütme gerekli |
+
+<Callout type="info" title="Best Practice">
+Saatte ortalama 3-5 log switch idealdir. Bu, redo log boyutunun workload'a uygun olduğunu gösterir.
+</Callout>
+
+### Günlük Redo Üretim Analizi
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT DAY,
+       COUNT#,
+       DAILY_AVG_GB,
+       CASE
+         WHEN COUNT# > 200 THEN 'KRITIK - Çok fazla switch'
+         WHEN COUNT# > 100 THEN 'UYARI - Switch sayısı yüksek'
+         WHEN COUNT# > 50 THEN 'İZLEME - Normalin üstünde'
+         ELSE 'NORMAL - İdeal durum'
+       END AS status
+FROM (
+  SELECT TO_CHAR(First_Time, 'YYYY-MM-DD') DAY,
+         COUNT(1) COUNT#,
+         ROUND(COUNT(1) * AVG(bytes) / 1024 / 1024 / 1024, 2) DAILY_AVG_GB
+  FROM v$log_history, v$log
+  GROUP BY TO_CHAR(First_Time, 'YYYY-MM-DD')
+  ORDER BY 1 DESC
+)
+WHERE ROWNUM <= 30;
+```
+
+## Gelişmiş Monitoring Sorguları
+
+### Saat Bazlı Log Switch Analizi
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT TO_CHAR(First_Time, 'HH24') HOUR,
+       COUNT(*) SWITCH_COUNT,
+       ROUND(COUNT(*) * AVG(bytes) / 1024 / 1024, 2) REDO_MB
+FROM v$log_history, v$log
+WHERE First_Time > TRUNC(SYSDATE)
+GROUP BY TO_CHAR(First_Time, 'HH24')
+ORDER BY HOUR;
+```
+
+### Peak Saat Tespiti
+
+```sql
+-- En yoğun saatleri bulun
+SELECT TO_CHAR(First_Time, 'YYYY-MM-DD HH24:MI') SWITCH_TIME,
+       sequence#,
+       ROUND(bytes / 1024 / 1024, 2) SIZE_MB
+FROM v$log_history, v$log
+WHERE First_Time > TRUNC(SYSDATE - 7)
+ORDER BY bytes DESC
+FETCH FIRST 10 ROWS ONLY;
+```
+
+### Redo Log Boyutları
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT group#,
+       thread#,
+       sequence#,
+       ROUND(bytes / 1024 / 1024, 2) SIZE_MB,
+       members,
+       archived,
+       status,
+       first_change#,
+       TO_CHAR(first_time, 'YYYY-MM-DD HH24:MI:SS') FIRST_TIME
+FROM v$log
+ORDER BY group#;
+```
+
+### Redo Generation Rate (Saniye Başına)
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT d.retain_time,
+       ROUND(SUM(rpb.value) / 1024 / 1024, 2) redo_mb_per_sec,
+       ROUND(SUM(rpb.value) / 1024 / 1024 * 60 * 60, 2) redo_gb_per_hour
+FROM v$sysstat rpb, v$database d
+WHERE rpb.name = 'redo size'
+GROUP BY d.retain_time;
+```
+
+## Redo Log Optimizasyonu
+
+### Redo Log Boyutunu Belirleme
+
+Oracle şu formülü önerir:
+
+```
+Ideal Redo Log Size = (Günlük Redo Üretimi / İdeal Switch Sayısı) * Güvenlik Faktörü
+```
+
+Örneğin:
+- Günlük redo: 50 GB
+- İdeal switch: 20/gün = yaklaşık 1 saatte 1
+- Güvenlik faktörü: 1.5
+
+```
+Ideal Size = (50 GB / 20) * 1.5 = 3.75 GB
+```
+
+### Redo Log Büyütme Adımları
+
+```sql
+-- 1. Mevcut redo log durumunu kontrol edin
+SELECT group#, bytes/1024/1024 size_mb, status FROM v$log;
+
+-- 2. Yeni redo log grupları ekleyin (örneğin 4 GB)
+ALTER DATABASE ADD LOGFILE GROUP 4 '/path/to/redo04.log' SIZE 4G;
+ALTER DATABASE ADD LOGFILE GROUP 5 '/path/to/redo05.log' SIZE 4G;
+ALTER DATABASE ADD LOGFILE GROUP 6 '/path/to/redo06.log' SIZE 4G;
+
+-- 3. Mevcut grupları drop edin (active değilse)
+ALTER DATABASE DROP LOGFILE GROUP 1;
+ALTER DATABASE DROP LOGFILE GROUP 2;
+ALTER DATABASE DROP LOGFILE GROUP 3;
+
+-- 4. Yeniden oluşturun (isteğe bağlı)
+ALTER DATABASE ADD LOGFILE GROUP 1 '/path/to/redo01.log' SIZE 4G;
+```
+
+<Callout type="warning" title="Kritik Uyarı">
+Redo log büyütme işlemi production'da dikkatli yapılmalıdır. Bakım penceresinde yapın veya manual switch ile kontrol edin.
+</Callout>
+
+### Multi-Member Redo Log (Multiplexing)
+
+```sql
+-- Her group için 2-3 member kullanın (mirroring)
+ALTER DATABASE ADD LOGFILE GROUP 1
+  ('/u01/oradata/redo01a.log',
+   '/u02/oradata/redo01b.log',
+   '/u03/oradata/redo01c.log')
+  SIZE 4G;
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Log Switch Kontrolü
+
+```bash
+#!/bin/bash
+# logswitch_check.sh
+
+SWITCH_COUNT=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT COUNT(*) FROM v\$log_history WHERE First_Time > TRUNC(SYSDATE);
+EOF
+)
+
+echo "Today's log switch count: $SWITCH_COUNT"
+
+if [ $SWITCH_COUNT -gt 100 ]; then
+    echo "WARNING: High log switch frequency detected"
+    mail -s "Redo Log Switch Warning" dba@company.com
+fi
+```
+
+### 2. Redo Growth Trend Analizi
+
+```sql
+-- Son 7 günün redo üretim trendi
+SELECT TRUNC(first_time) DAY,
+       COUNT(*) switch_count,
+       ROUND(COUNT(*) * AVG(bytes) / 1024 / 1024 / 1024, 2) redo_gb
+FROM v$log_history, v$log
+WHERE first_time > TRUNC(SYSDATE - 7)
+GROUP BY TRUNC(first_time)
+ORDER BY DAY;
+```
+
+### 3. Log Switch Scheduling
+
+```bash
+# Yoğun saatlerde manual switch yapın
+sqlplus / as sysdba <<EOF
+ALTER SYSTEM SWITCH LOGFILE;
+EOF
+```
+
+## Troubleshooting
+
+### Sorun: Çok Yüksek Log Switch
+
+**Nedenler:**
+- Redo log boyutu çok küçük
+- Çok yoğun DML activity
+- Excessive logging (audit, trigger)
+
+**Çözüm:**
+
+1. Redo log boyutunu artırın
+2. NOLOGGING operations kullanın (mümkünse)
+3. Audit seviyesini kontrol edin
+4. Excessive trigger'ları inceleyin
+
+### Sorun: Checkpoint Uzun Sürüyor
+
+**Çözüm:**
+
+```sql
+-- Fast_start_mttr_target parametresini ayarlayın
+ALTER SYSTEM SET fast_start_mttr_target = 300 SCOPE=BOTH;
+
+-- Checkpoint frekansını artırın
+ALTER SYSTEM SET checkpoint_interval = 10000;
+```
+
+### Sorun: Log Switch Sırasında Performans Düşüşü
+
+**Çözüm:**
+
+```sql
+-- I/O spread için farklı diskler kullanın
+-- Multi-member redo log kullanın
+-- Async I/O'yu enable edin
+ALTER SYSTEM SET filesystemio_options = ASYNCH SCOPE=SPFILE;
+-- ve restart
+```
+
+## Best Practices
+
+### 1. Redo Log Sayısı
+
+- Minimum 3 redo log group
+- Ideal: 4-6 group (rotation için)
+- RAC'ta her thread için minimum 2 group
+
+### 2. Redo Log Boyutu
+
+- Small workload (&lt; 50 GB/gün): 512 MB - 1 GB
+- Medium workload (50-200 GB/gün): 1-4 GB
+- Large workload (&gt; 200 GB/gün): 4-16 GB
+
+### 3. Multiplexing
+
+- Her group için minimum 2 member
+- Member'ları farklı disklere yerleştirin
+- Farklı controller kullanın (mümkünse)
+
+### 4. Monitoring
+
+- Günlük log switch sayısını izleyin
+- Redo generation rate'i takip edin
+- Trend analizi yapın
+
+## İlgili Görünümler
+
+- `V$LOG` - Redo log file bilgileri
+- `V$LOGFILE` - Redo log file detayları
+- `V$LOG_HISTORY` - Log switch historisi
+- `V$SYSSTAT` - Redo size istatistiği
+
+## Kaynaklar
+
+- Oracle Database Administrator's Guide
+- Oracle Database Performance Tuning Guide
+- Oracle Backup and Recovery Guide
+
+## Sonraki Adımlar
+
+Bu redo log analysis ile şunları yapabilirsiniz:
+
+- Redo log boyutunu optimize etme
+- Checkpoint tuning
+- I/O performansını iyileştirme
+- Recovery time hedeflerini belirleme
+- Capacity planning
+
+Redo log optimizasyonu, Oracle veritabanı performansı için kritik öneme sahiptir. Bu scriptleri düzenli kullanarak redo log yapınızı workload'a göre optimize edebilirsiniz.

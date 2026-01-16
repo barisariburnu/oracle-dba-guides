@@ -1,0 +1,420 @@
+---
+title: "Oracle Flashback Database Konfigürasyonu - Complete Setup Guide"
+description: "Oracle Flashback Database özelliğini aktif etme, restore point oluşturma, flashback recovery ve complete disaster senaryoları için kullanım."
+date: 2025-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "flashback", "recovery", "restore point", "disaster", "dba", "database"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Flashback Database Konfigürasyonu
+
+Oracle **Flashback Database** özelliği, veritabanını geçmiş bir zaman noktasına hızlıca döndürmek için powerful bir araçtır. Bu yazıda flashback konfigürasyonu, **restore point** oluşturma ve **flashback recovery** işlemlerini detaylı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Flashback Database, veritabanını dakikalar içinde saatler öncesine döndürebilir. Ancak archivelog mode şarttır.
+</Callout>
+
+## Script'in Amacı
+
+Bu script ile şu işlemler gerçekleştirilir:
+
+- **Flashback mode** aktif etme
+- **Recovery area** konfigürasyonu
+- **Restore point** oluşturma ve yönetme
+- **Flashback database** ile zaman yolculuğu
+- **Resetlogs** ile database açma
+
+## Önkoşullar
+
+1. **Archivelog mode** aktif olmalı
+2. **Fast Recovery Area (FRA)** konfigüre edilmiş olmalı
+3. **Enterprise Edition** lisansı
+4. **Yeterli disk alanı** (flashback logs için)
+
+## Flashback Database Konfigürasyonu
+
+### Adım 1: Mevcut Durumu Kontrol Et
+
+```sql
+-- Flashback durumunu kontrol et
+SELECT flashback_on FROM v$database;
+
+-- Çıktı:
+-- FLASHBACK_ON
+-- ------------
+-- NO
+```
+
+### Adım 2: Archivelog Mode'a Geç
+
+```sql
+-- Mevcut log mode'u kontrol et
+SELECT log_mode FROM v$database;
+
+-- NOARCHIVELOG ise:
+-- 1. Database'i shutdown et
+SHUTDOWN IMMEDIATE;
+
+-- 2. Mount modda başlat
+STARTUP MOUNT;
+
+-- 3. Archivelog mode'a geç
+ALTER DATABASE ARCHIVELOG;
+
+-- 4. Database'i aç
+ALTER DATABASE OPEN;
+
+-- Kontrol et
+SELECT log_mode FROM v$database;
+
+-- Çıktı:
+-- LOG_MODE
+-- ------------
+-- ARCHIVELOG
+```
+
+<Callout type="warning" title="Kritik Uyarı">
+Archivelog mode'a geçiş için:
+1. Database'i backup yapın
+2. Maintenance window'da çalışın
+3. Yeterli disk alanı olduğundan emin olun
+</Callout>
+
+### Adım 3: Flashback Retention Target Ayarla
+
+```sql
+-- Flashback retention target (dakika cinsinden)
+-- Örnek: 600 dakika = 10 saat
+ALTER SYSTEM SET db_flashback_retention_target = 600 SCOPE=BOTH;
+
+-- Kontrol et
+SHOW PARAMETER db_flashback_retention_target
+
+-- Çıktı:
+-- NAME                                 TYPE        VALUE
+-- ------------------------------------ ----------- ------------------
+-- db_flashback_retention_target         integer     600
+```
+
+### Adım 4: Recovery Destination Size Ayarla
+
+```sql
+-- Recovery area boyutunu ayarla (500GB örneği)
+ALTER SYSTEM SET db_recovery_file_dest_size = 500G SCOPE=BOTH;
+
+-- Recovery destination path
+SHOW PARAMETER db_recovery_file_dest
+
+-- Çıktı:
+-- NAME                       TYPE        VALUE
+-- -------------------------- ----------- ------------------
+-- db_recovery_file_dest      string      +DATA
+-- db_recovery_file_dest_size big integer 500G
+```
+
+<Callout type="info" title="Bilgi">
+Flashback logs approximately 1-2 MB/sn büyüme oranına sahiptir. 10 saatlik retention için ~36GB alan gerekir.
+</Callout>
+
+### Adım 5: Flashback Modu Aktif Et
+
+```sql
+-- Database'i mount modda başlat
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+
+-- Flashback'i aktif et
+ALTER DATABASE FLASHBACK ON;
+
+-- Database'i aç
+ALTER DATABASE OPEN;
+
+-- Kontrol et
+SELECT flashback_on FROM v$database;
+
+-- Çıktı:
+-- FLASHBACK_ON
+-- ------------
+-- YES
+```
+
+## Restore Point Oluşturma
+
+### Guaranteed Restore Point
+
+```sql
+-- Guaranteed restore point oluştur (disk alanı garantisi)
+CREATE RESTORE POINT before_critical_update GUARANTEE FLASHBACK DATABASE;
+
+-- Mevcut restore point'leri listele
+SELECT name,
+       scn,
+       time,
+       storage_size,
+       guaranteed
+FROM   v$restore_point
+ORDER  BY time DESC;
+
+-- Çıktı:
+-- NAME                        SCN  TIME                 STORAGE_SIZE   GUARANTEE
+-- ------------------------- ----- -------------------- -------------- ----------
+-- BEFORE_CRITICAL_UPDATE     123456 16-JAN-25 10:30:00   1.5GB          YES
+```
+
+### Normal Restore Point
+
+```sql
+-- Normal (guaranteed olmayan) restore point
+CREATE RESTORE POINT nightly_backup;
+
+-- Farklar:
+-- - Guaranteed: Disk alanı ne olursa olsun korur
+-- - Normal: Disk alanı biterse silinebilir
+```
+
+### Restore Point Drop
+
+```sql
+-- Restore point'i sil
+DROP RESTORE POINT before_critical_update;
+
+-- Kontrol et
+SELECT name, scn, time FROM v$restore_point;
+```
+
+## Flashback Database Kullanımı
+
+### Senaryo 1: Restore Point'e Dönüş
+
+```sql
+-- 1. Database'i mount modda başlat
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+
+-- 2. Restore point'e dön
+FLASHBACK DATABASE TO RESTORE POINT before_critical_update;
+
+-- 3. Database'i resetlogs ile aç
+ALTER DATABASE OPEN RESETLOGS;
+
+-- 4. Verify
+SELECT * FROM scott.employees; -- Verilerin geri döndüğünü doğrulayın
+```
+
+<Callout type="warning" title="Kritik Uyarı">
+FLASHBACK DATABASE ve RESETLOGS:
+- Flashback sonrası mutlaka RESETLOGS gerekir
+- Resetlogs sonrası önceki backup'lar invalid olur
+- Yeni backup alınmalıdır
+</Callout>
+
+### Senaryo 2: SCN'ye Dönüş
+
+```sql
+-- Belirli bir SCN'ye dön
+FLASHBACK DATABASE TO SCN 123456;
+
+-- Veya zaman damgasına göre dön
+FLASHBACK DATABASE TO TIMESTAMP TO_TIMESTAMP('2025-01-16 10:00:00', 'YYYY-MM-DD HH24:MI:SS');
+
+-- Open with resetlogs
+ALTER DATABASE OPEN RESETLOGS;
+```
+
+### Senaryo 3: Önceki Backup'a Dönüş
+
+```sql
+-- Flashback log yetersizse, archivelog'dan recover
+-- 1. Flashback database ile mümkün olduğuna kadar git
+FLASHBACK DATABASE TO SCN 100000;
+
+-- 2. Geri kalanı archivelog'dan recover et
+RECOVER DATABASE;
+
+-- 3. Open resetlogs
+ALTER DATABASE OPEN RESETLOGS;
+```
+
+## Monitoring ve Maintenance
+
+### Flashback Logs Usage
+
+```sql
+-- Flashback log kullanımını izle
+SELECT name,
+       flashback_size / 1024 / 1024 AS flashback_size_mb,
+       estimated_flashback_size / 1024 / 1024 AS estimated_size_mb,
+       db_flashback_retention_target AS retention_minutes
+FROM   v$flashback_database_logfile,
+       (SELECT value AS db_flashback_retention_target
+        FROM   v$parameter
+        WHERE  name = 'db_flashback_retention_target');
+```
+
+### Oldest Flashback Time
+
+```sql
+-- En eski flashback zamanını görüntüle
+SELECT oldest_flashback_scn,
+       oldest_flashback_time,
+       to_char(oldest_flashback_time, 'YYYY-MM-DD HH24:MI:SS') AS oldest_time,
+       ROUND(SYSDATE - oldest_flashback_time, 2) AS days_retention
+FROM   v$flashback_database_log;
+```
+
+**Çıktı:**
+
+```
+OLDEST_FLASHBACK_SCN  OLDEST_FLASHBACK_TIME  OLDEST_TIME           DAYS_RETENTION
+------------------- ----------------------- --------------------- ---------------
+123456               16-JAN-2025 00:30:00    2025-01-16 00:30:00                0.42
+```
+
+### Flashback Statistics
+
+```sql
+-- Flashback database istatistikleri
+SELECT * FROM v$flashback_database_stat;
+```
+
+## Kullanım Senaryoları
+
+### Senaryo 1: Major Update Öncesi
+
+```sql
+-- 1. Restore point oluştur
+CREATE RESTORE POINT pre_upgrade GUARANTEE FLASHBACK DATABASE;
+
+-- 2. Upgrade'i başlat
+-- ... upgrade işlemleri ...
+
+-- 3. Problem olursa geri dön
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+FLASHBACK DATABASE TO RESTORE POINT pre_upgrade;
+ALTER DATABASE OPEN RESETLOGS;
+```
+
+### Senaryo 2: Batch Job Hatası
+
+```sql
+-- 1. Hatalı batch job çalıştı
+-- 2. Job'u fark ettiniz
+
+-- 3. Batch'ten önceki restore point'e dön
+FLASHBACK DATABASE TO RESTORE POINT before_batch;
+
+-- 4. Job'u düzelt ve tekrar çalıştır
+```
+
+### Senaryo 3: Test Senaryoları
+
+```sql
+-- 1. Test için restore point oluştur
+CREATE RESTORE POINT test_start GUARANTEE FLASHBACK DATABASE;
+
+-- 2. Test senaryolarını çalıştır
+-- ... various tests ...
+
+-- 3. Her testten sonra başa dön
+FLASHBACK DATABASE TO RESTORE POINT test_start;
+ALTER DATABASE OPEN RESETLOGS;
+```
+
+## Best Practices
+
+### 1. Retention Period Ayarı
+
+```sql
+-- İş ihtiyaçlarına göre ayarlayın
+-- - Kritik sistemler: 24-48 saat (1440-2880 dakika)
+-- - Normal sistemler: 8-12 saat (480-720 dakika)
+-- - Test sistemleri: 2-4 saat (120-240 dakika)
+
+ALTER SYSTEM SET db_flashback_retention_target = 1440 SCOPE=BOTH;
+```
+
+### 2. Disk Alanı Planlaması
+
+```sql
+-- Flashback logs için hesaplama:
+-- Approximate growth = 1-2 MB/sn
+-- 24 saatlik retention = ~150 GB
+-- 48 saatlik retention = ~300 GB
+
+ALTER SYSTEM SET db_recovery_file_dest_size = 500G SCOPE=BOTH;
+```
+
+### 3. Guaranteed vs Normal Restore Point
+
+```sql
+-- Guaranteed: Kritik işlemler için
+CREATE RESTORE POINT pre_upgrade GUARANTEE FLASHBACK DATABASE;
+
+-- Normal: Düzenli checkpoint'ler için
+CREATE RESTORE POINT hourly_checkpoint;
+```
+
+### 4. Monitoring Script
+
+```bash
+#!/bin/bash
+# flashback_monitor.sh - Flashback alanı monitoring script'i
+
+sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0
+SELECT ROUND(used_bytes / 1024 / 1024, 2) || ' MB' AS flashback_used
+FROM   (SELECT SUM(bytes) AS used_bytes
+        FROM   v\$flashback_database_logfile)
+WHERE  used_bytes > (SELECT value * 1024 * 1024 * 1024
+                     FROM   v\$parameter
+                     WHERE  name = 'db_recovery_file_dest_size') * 0.8;
+EOF
+
+# Email gönderme (alert durumunda)
+if [ $? -eq 0 ]; then
+  echo "Flashback area approaching limit. Please check." | mail -s "Flashback Alert" dba@company.com
+fi
+```
+
+## Troubleshooting
+
+### Sorun 1: Flashback Logs Yetersiz
+
+```sql
+-- Hata: ORA-38760: This database instance cannot be flashed back
+-- Çözüm: Retention period'ı azalt veya archivelog'dan recover et
+
+ALTER SYSTEM SET db_flashback_retention_target = 240 SCOPE=BOTH;
+```
+
+### Sorun 2: Disk Alanı Yetersiz
+
+```sql
+-- Recovery area doluysa eski restore point'leri sil
+DROP RESTORE POINT old_restore_point;
+
+-- Veya retention period'ı azalt
+ALTER SYSTEM SET db_flashback_retention_target = 120 SCOPE=BOTH;
+```
+
+### Sorun 3: Flashback Disable
+
+```sql
+-- Flashback'i kapat (gerektiğinde)
+SHUTDOWN IMMEDIATE;
+STARTUP MOUNT;
+ALTER DATABASE FLASHBACK OFF;
+ALTER DATABASE OPEN;
+```
+
+## İlgili Kaynaklar
+
+- [Flashback Database Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/19/bradv/using-flashback-database.html)
+- [Restore Points Guide](https://docs.oracle.com/en/database/oracle/oracle-database/19/bradv/using-restore-points.html)
+- [Flashback Technology Overview](https://docs.oracle.com/en/database/oracle/oracle-database/19/bradv/flashback-technology-overview.html)
+
+Bu yazıda Flashback Database konfigürasyonunu öğrendiniz. Diğer recovery yöntemleri için blog yazılarımızı takip edin.

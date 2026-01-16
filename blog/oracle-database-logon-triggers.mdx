@@ -1,0 +1,102 @@
+---
+title: "Oracle Veritabanı Logon Triggerları ve Otomatik Operasyonlar"
+description: "Oracle'da AFTER LOGON triggerlarını kullanarak kullanıcı oturumlarını otomatik izleme (Trace), NLS ayarlarını yapılandırma ve güvenlik kontrolleri yapma."
+date: "2026-01-16"
+category: "Geliştirme"
+tags: ["Oracle Trigger", "Logon Trigger", "Trace", "Security", "Session Management", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Logon Triggerları ile Otomasyon
+
+Veritabanına bir kullanıcı bağlandığında (Login), o oturum için belirli ayarların otomatik olarak yapılması veya belirli kriterlere göre oturumun izlenmesi gerekebilir. Oracle'da **Database Event Triggerları**, özellikle de `AFTER LOGON` triggerı, bu tür operasyonlar için mükemmel bir araçtır.
+
+
+<!--truncate-->
+Bu makalede, logon triggerlarının en yaygın kullanım senaryolarını inceleyeceğiz.
+
+## 1. Belirli Bir Kullanıcıyı Otomatik Trace Etme (10046)
+
+Uygulamanın bir parçası olan bir kullanıcının tüm işlemlerini izlemek istiyorsanız, ancak uygulamanın koduna müdahale edemiyorsanız, bir logon triggerı ile o kullanıcı her bağlandığında trace başlatabilirsiniz.
+
+```sql
+CREATE OR REPLACE TRIGGER ON_LOGON_TRACE_MBS
+AFTER LOGON ON DATABASE
+BEGIN
+  -- Sadece MBS kullanıcısı bağlandığında çalışır
+  IF (USER = 'MBS') THEN
+    EXECUTE IMMEDIATE 'ALTER SESSION SET EVENTS ''10046 TRACE NAME CONTEXT FOREVER, LEVEL 12''';
+  END IF;
+END;
+/
+```
+
+---
+
+## 2. Oturum Seviyesinde NLS ve Optimizasyon Ayarları
+
+Bazı eski uygulamalar belirli tarih formatları veya optimizasyon parametreleri gerektirebilir.
+
+```sql
+CREATE OR REPLACE TRIGGER SET_APPS_NLS
+AFTER LOGON ON DATABASE
+BEGIN
+  IF (USER = 'ESKI_UYGULAMA') THEN
+    EXECUTE IMMEDIATE 'ALTER SESSION SET NLS_DATE_FORMAT = ''DD-MM-YYYY''';
+    EXECUTE IMMEDIATE 'ALTER SESSION SET "_optimizer_index_caching" = 90';
+  END IF;
+END;
+/
+```
+
+---
+
+## 3. IP Bazlı Erişim Kısıtlaması (Güvenlik)
+
+Veritabanı bazlı basit bir firewall gibi, belirli kullanıcıların sadece belirli IP adreslerinden veya makine isimlerinden bağlanmasına izin verebilirsiniz.
+
+```sql
+CREATE OR REPLACE TRIGGER SECURITY_CHECK_IP
+AFTER LOGON ON DATABASE
+DECLARE
+  v_ip   VARCHAR2(50);
+  v_host VARCHAR2(50);
+BEGIN
+  v_ip   := SYS_CONTEXT('USERENV', 'IP_ADDRESS');
+  v_host := SYS_CONTEXT('USERENV', 'HOST');
+
+  -- HR kullanıcısı sadece güvenli IP'den bağlanabilir
+  IF (USER = 'HR' AND v_ip NOT IN ('192.168.1.101', '192.168.1.101')) THEN
+    RAISE_APPLICATION_ERROR(-20001, 'Yetkisiz IP adresinden baglanti denemesi: ' || v_ip);
+  END IF;
+END;
+/
+```
+
+---
+
+## 4. Kaynak Sınırlandırma (Profile Dışında)
+
+Resource Manager dışında, program adına göre dahi filtreleme yapabilirsiniz.
+
+```sql
+CREATE OR REPLACE TRIGGER KISITLA_PROGRAM
+AFTER LOGON ON DATABASE
+BEGIN
+  -- TOAD veya SQL Developer gibi araçlarla bağlanmaya çalışan uygulama kullanıcılarını durdur
+  IF (SYS_CONTEXT('USERENV', 'MODULE') LIKE 'TOAD%' OR 
+      SYS_CONTEXT('USERENV', 'MODULE') LIKE 'SQL Developer%') 
+     AND USER = 'UYGULAMA_USER' THEN
+     RAISE_APPLICATION_ERROR(-20002, 'Uygulama kullanicisi ile direkt baglanti yasaktir!');
+  END IF;
+END;
+/
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Hata Kontrolü:** Logon triggerı içindeki bir hata, kullanıcının veritabanına bağlanmasını engelleyebilir. Bu yüzden mutlaka `EXCEPTION` blokları kullanın veya kodu iyice test edin.
+-   **Kritik Kullanıcılar:** `SYS` kullanıcısı için logon triggerları genellikle çalışmaz (güvenlik nedeniyle), bu sayede bir hata durumunda `SYS` ile bağlanıp trigger'ı silebilirsiniz.
+-   **Performans:** Logon triggerı her bağlantıda çalışacağı için kodun çok hızlı ve hafif olması gerekir. Karmaşık sorgulardan kaçının.
+
+Logon triggerları, veritabanı yönetiminde esneklik ve kontrol sağlayan güçlü bir mekanizmadır.

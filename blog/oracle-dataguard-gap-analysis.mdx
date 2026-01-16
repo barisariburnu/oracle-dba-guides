@@ -1,0 +1,414 @@
+---
+title: "Oracle Data Guard Gap Analysis ve Lag Monitoring"
+description: "Data Guard replication lag'ını analiz etme, apply gecikmesini ölçme ve transport istatistiklerini izleme rehberi."
+date: 2026-01-16
+category: "Oracle Data Guard"
+tags: ["oracle", "data guard", "gap analysis", "lag monitoring", "replication", "standby"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Gap Analysis ve Lag Monitoring
+
+Data Guard ortamlarında replication lag'ını izlemek, standby veritabanının güncelliğini garanti etmek için kritik öneme sahiptir. Bu makalede, Data Guard lag analizi ve monitoring için kapsamlı bir rehber sunacağım.
+
+
+<!--truncate-->
+## Data Guard Lag Nedir?
+
+Data Guard lag, primary veritabanının standby veritabanından ne kadar ileride olduğunu gösterir. Lag şu şekilde oluşur:
+
+1. **Primary'de redo log üretilir**
+2. **Redo log standby'e transfer edilir** (transport lag)
+3. **Standby'de redo log apply edilir** (apply lag)
+
+<Callout type="warning" title="Kritik Uyarı">
+Lag süresi RPO (Recovery Point Objective) hedefinizi aşarsa, disaster senaryosunda veri kaybı yaşayabilirsiniz. Lag'ı düzenli izleyin vethreshold belirleyin.
+</Callout>
+
+## Script Özellikleri
+
+Bu monitoring scripti şu bilgileri sağlar:
+
+- Transport lag (redo shipping gecikmesi)
+- Apply lag (redo apply gecikmesi)
+- Estimated startup time (gerekirse recovery için)
+- Apply finish time bilgileri
+- Real-time lag istatistikleri
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- Data Guard yapılandırılmış olmalı
+- Standby veritabanında SYSDBA yetkisi
+- `V$DATAGUARD_STATS` view'ine erişim
+
+## Script İçeriği
+
+```sql
+set line 200
+set pagesize 200
+
+SELECT name,
+       value,
+       time_computed,
+       datum
+FROM v$dataguard_stats
+ORDER BY name;
+
+exit;
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama | Örnek Değer |
+|-------|----------|-------------|
+| **NAME** | İstatistik adı | apply lag, transport lag |
+| **VALUE** | Değer | +00 00:05:00 |
+| **TIME_COMPUTED** | Hesaplama zamanı | 01/16/2026 10:30:45 |
+| **DATUM** | Veri birimi | seconds, minutes |
+
+## Örnek Çıktı
+
+```
+NAME                       VALUE            TIME_COMPUTED
+------------------------- ---------------- --------------------
+apply lag                  +00 00:05:23     01/16/2026 10:30:45
+apply finish time          +00 00:00:00     01/16/2026 10:30:45
+estimated_startup_time     15               01/16/2026 10:30:45
+transport lag              +00 00:00:00     01/16/2026 10:30:45
+standby redo logs (SRL)    5                01/16/2026 10:30:45
+```
+
+## Data Guard İstatistikleri
+
+### 1. Transport Lag
+
+- **Açıklama**: Primary'den standby'e redo shipping gecikmesi
+- **Ideal Değer**: +00 00:00:00 (hiç lag yok)
+- **Acceptable**: &lt; 5 dakika
+- **Critical**: &gt; 15 dakika
+
+<Callout type="info" title="Transport Lag Causes">
+- Network sorunları
+- Standby veritabanı kapalı
+- RFS process sorunu
+- Disk doluluk sorunu
+</Callout>
+
+### 2. Apply Lag
+
+- **Açıklama**: Standby'de redo apply gecikmesi
+- **Ideal Değer**: +00 00:00:00 (hiç lag yok)
+- **Acceptable**: &lt; 5 dakika
+- **Critical**: &gt; 15 dakika
+
+### 3. Apply Finish Time
+
+- **Açıklama**: Apply işleminin ne zaman tamamlanacağı
+- **Değer**: +00 00:00:00 ise active applying
+
+### 4. Estimated Startup Time
+
+- **Açıklama**: Standby'i açmak için gereken süre (dakika)
+- **Kullanım**: Disaster recovery planlaması için
+
+## Gelişmiş Monitoring Sorguları
+
+### Lag Analizi (Dakika Cinsinden)
+
+```sql
+set linesize 200
+set pagesize 200
+
+SELECT name,
+       value,
+       TO_NUMBER(SUBSTR(value, 1, 2)) * 24 * 60 +
+       TO_NUMBER(SUBSTR(value, 4, 2)) * 60 +
+       TO_NUMBER(SUBSTR(value, 7, 2)) AS lag_minutes,
+       time_computed
+FROM v$dataguard_stats
+WHERE name IN ('apply lag', 'transport lag')
+ORDER BY name;
+```
+
+### Lag Trend Analizi (Son 24 Saat)
+
+```sql
+-- Bu sorgu AWR verilerini kullanır
+SELECT snap_id,
+       end_interval_time,
+       CASE
+         WHEN apply_time > 0 THEN ROUND(apply_time / 60, 2)
+         ELSE 0
+       END AS apply_lag_minutes,
+       CASE
+         WHEN transport_time > 0 THEN ROUND(transport_time / 60, 2)
+         ELSE 0
+       END AS transport_lag_minutes
+FROM (
+  SELECT snap_id,
+         end_interval_time,
+         CASE
+           WHEN NAME = 'apply lag' THEN value_seconds
+         END AS apply_time,
+         CASE
+           WHEN NAME = 'transport lag' THEN value_seconds
+         END AS transport_time
+  FROM dba_hist_dataguard_stats
+  WHERE end_interval_time > SYSDATE - 1
+)
+ORDER BY snap_id DESC;
+```
+
+### Sequence Numarası Bazlı Gap Analizi
+
+```sql
+set linesize 200
+set pagesize 200
+
+-- Standby'de çalıştırın
+WITH primary AS (
+  SELECT MAX(sequence#) AS max_seq
+  FROM v$archived_log
+),
+standby AS (
+  SELECT MAX(sequence#) AS max_applied_seq
+  FROM v$archived_log
+  WHERE applied = 'YES'
+)
+SELECT p.max_seq - s.max_applied_seq AS sequence_gap,
+       p.max_seq AS primary_seq,
+       s.max_applied_seq AS standby_applied_seq,
+       ROUND((p.max_seq - s.max_applied_seq) * 200 / 1024 / 60, 2) AS estimated_gap_minutes
+FROM primary p, standby s;
+```
+
+### Real-time Apply Durumu
+
+```sql
+SELECT database_role,
+       open_mode,
+       protection_mode,
+       protection_level,
+       flashbacks_on
+FROM v$database;
+
+-- Eğer open_mode = READ ONLY WITH APPLY ise Active Data Guard aktiftir
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Lag Kontrolü
+
+Her gün Data Guard lag'ını kontrol edin:
+
+```bash
+#!/bin/bash
+# dg_lag_check.sh
+
+LAG=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT TO_NUMBER(SUBSTR(value, 1, 2)) * 24 * 60 +
+       TO_NUMBER(SUBSTR(value, 4, 2)) * 60 +
+       TO_NUMBER(SUBSTR(value, 7, 2)) AS lag_minutes
+FROM v\$dataguard_stats
+WHERE name = 'apply lag' AND ROWNUM = 1;
+EOF
+)
+
+echo "Current Data Guard Apply Lag: $LAG minutes"
+
+if [ $LAG -gt 15 ]; then
+    echo "ALARM: Data Guard lag is ${LAG} minutes (threshold: 15 min)"
+    mail -s "Data Guard Lag Alarm" dba@company.com
+fi
+```
+
+### 2. Hourly Lag Monitoring
+
+Her saat lag'ı takip edin ve grafik oluşturun:
+
+```bash
+#!/bin/bash
+# dg_lag_monitor.sh
+
+while true; do
+    date >> /tmp/dg_lag.log
+    sqlplus -s / as sysdba @dg_durum.sql >> /tmp/dg_lag.log
+    echo "----------------------------------------" >> /tmp/dg_lag.log
+    sleep 3600  # 1 saat bekle
+done
+```
+
+### 3. Lag Threshold Alarm
+
+```sql
+-- SQL ile kontrol
+BEGIN
+  FOR rec IN (SELECT value FROM v$dataguard_stats WHERE name = 'apply lag') LOOP
+    IF TO_NUMBER(SUBSTR(rec.value, 1, 2)) * 24 * 60 +
+       TO_NUMBER(SUBSTR(rec.value, 4, 2)) * 60 +
+       TO_NUMBER(SUBSTR(rec.value, 7, 2)) > 15 THEN
+
+      -- E-mail gönder (Oracle UTL_SMTP kullanarak)
+      -- Veya alarm tablosuna yaz
+      INSERT INTO dg_alarm_log (alarm_time, lag_value, alarm_type)
+      VALUES (SYSDATE, rec.value, 'LAG THRESHOLD EXCEEDED');
+      COMMIT;
+    END IF;
+  END LOOP;
+END;
+/
+```
+
+## Troubleshooting
+
+### Sorun: Transport Lag &gt; 0
+
+**Muhtemel Nedenler:**
+1. Network bağlantı sorunu
+2. Standby veritabanı kapalı
+3. RFS process çalışmıyor
+4. Disk dolu
+
+**Çözüm:**
+
+```sql
+-- 1. Network test
+ping <standby_host>
+telnet <standby_host> 1521
+
+-- 2. Standby durumu kontrolü
+SELECT process, status FROM v$managed_standby;
+
+-- 3. RFS process kontrolü
+SELECT * FROM v$managed_standby WHERE process = 'RFS';
+
+-- 4. Disk alanı kontrolü
+SELECT name, free_mb FROM v$asm_diskgroup;
+```
+
+### Sorun: Apply Lag &gt; 0
+
+**Muhtemel Nedenler:**
+1. MRP process çalışmıyor
+2. CPU yetersizliği
+3. I/O performans sorunu
+4. Çok fazla redo üretimi
+
+**Çözüm:**
+
+```sql
+-- 1. MRP process kontrolü
+SELECT process, status FROM v$managed_standby WHERE process = 'MRP0';
+
+-- 2. MRP'yi başlatın (çalışmıyorsa)
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+
+-- 3. Apply hızını artırın
+ALTER SYSTEM SET '_lmpty_time' = 1 SCOPE=SPFILE;
+-- ve restart
+```
+
+### Sorun: Gap Tespit Edildi
+
+**Çözüm:**
+
+```sql
+-- 1. Gap'ı tespit edin
+SELECT * FROM v$archive_gap;
+
+-- 2. Eksik archivelog'ları primary'den bulun
+SELECT name, sequence#, first_change#
+FROM v$archived_log
+WHERE sequence# BETWEEN <min_gap_seq> AND <max_gap_seq>
+ORDER BY sequence#;
+
+-- 3. Archivelog'ları standby'e kopyalayın
+scp /path/to/archivelog standby:/path/to/destination/
+
+-- 4. Standby'de register edin
+ALTER DATABASE REGISTER PHYSICAL LOGFILE '/path/to/archivelog';
+
+-- 5. MRP'yi restart edin
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+```
+
+## Performance Tuning
+
+### Apply Performansını İyileştirme
+
+```sql
+-- Parallelism ayarla (default: 0 = serial)
+ALTER SYSTEM SET parallel_max_servers = 16 SCOPE=BOTH;
+
+-- Real-time apply için
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+```
+
+### Network Tuning
+
+```sql
+-- Standby redo log boyutunu artırın
+-- Primary'deki online redo log boyutu ile aynı olmalı
+ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 SIZE 1G;
+
+-- Maximum SRL sayısı: (log_files + 1) * threads
+```
+
+## Best Practices
+
+### 1. Lag Threshold'ları
+
+- **Normal**: 0-5 dakika
+- **Warning**: 5-15 dakika
+- **Critical**: 15+ dakika
+
+### 2. Monitoring Frekansı
+
+- **Critical sistemler**: Her 5 dakikada bir
+- **Önemli sistemler**: Her 15 dakikada bir
+- **Normal sistemler**: Saatte bir
+
+### 3. Dokümantasyon
+
+- Baseline lag sürelerini not edin
+- Normal dalgalanmaları kaydedin
+- Anomalileri hızlıca tespit edin
+
+## Monitoring Dashboard Örneği
+
+Grafana veya dashboard tool'ları için şu metrikleri kullanın:
+
+1. **Transport Lag (seconds)**
+2. **Apply Lag (seconds)**
+3. **Sequence Number Gap**
+4. **Redo Apply Rate (MB/sec)**
+5. **Network Throughput**
+
+## İlgili Görünümler
+
+- `V$DATAGUARD_STATS` - Data Guard istatistikleri
+- `V$MANAGED_STANDBY` - Process durumları
+- `V$ARCHIVED_LOG` - Archived log bilgileri
+- `V$ARCHIVE_GAP` - Gap bilgileri
+- `DBA_HIST_DATAGUARD_STATS` - AWR historisi
+
+## Kaynaklar
+
+- Oracle Data Guard Broker Guide
+- Oracle Data Guard Concepts and Administration
+- MAA (Maximum Availability Architecture) Best Practices
+
+## Sonraki Adımlar
+
+Bu Data Guard lag analysis ile şunları yapabilirsiniz:
+
+- Otomatik alarm sistemi
+- Predictive lag analizi
+- Kapasite planlaması
+- RPO hesaplaması ve doğrulama
+- Multi-site monitoring
+
+Data Guard lag monitoring, disaster recovery stratejinin en kritik parçasıdır. Bu scriptleri düzenli kullanarak replication lag'ınızı kontrol altında tutabilirsiniz.

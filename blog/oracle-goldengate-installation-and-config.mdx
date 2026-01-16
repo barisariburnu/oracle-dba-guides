@@ -1,0 +1,109 @@
+---
+title: "Oracle GoldenGate Kurulum ve Başlangıç Konfigürasyonu"
+description: "Oracle GoldenGate (OGG) kurulum adımları, kullanıcı yetkilendirme, Supplemental Logging yapılandırması ve ilk Extract/Pump/Replicat süreçlerinin oluşturulması."
+date: "2026-01-16"
+category: "GoldenGate"
+tags: ["Oracle GoldenGate", "OGG Installation", "Supplemental Logging", "Extract", "Data Pump", "Replicat", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle GoldenGate Kurulum ve Başlangıç Konfigürasyonu
+
+Oracle **GoldenGate**, heterojen veritabanları arasında düşük gecikmeli veri replikasyonu sağlayan endüstri standardı bir çözümdür. Ancak başarılı bir replikasyonun anahtarı, kurulum aşamasındaki titiz yapılandırmadır. Eksik bir yetki veya yanlış bir logging ayarı, replikasyonun tutarsız olmasına neden olabilir. Bu makalede, Oracle veritabanı üzerinde GoldenGate kurulum adımlarını ve ilk süreçlerin (Extract, Pump) nasıl ayağa kaldırılacağını adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Veritabanı Hazırlığı (Supplemental Logging)
+
+GoldenGate'in tablodaki satır değişimlerini (UPDATE/DELETE) doğru yakalayabilmesi için veritabanında **Supplemental Logging** özelliğinin aktif olması gerekir.
+
+```sql
+-- Minimum supplemental log aktif etme
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+
+-- Değişikliğin aktifleşmesi için log switch
+ALTER SYSTEM SWITCH LOGFILE;
+```
+
+---
+
+## 2. GoldenGate Kullanıcısı ve Yetkiler
+
+Her iki tarafta da (Kaynak ve Hedef) GoldenGate süreçlerini yönetecek bir kullanıcı oluşturulmalıdır.
+
+```sql
+CREATE USER GOLDENGATE IDENTIFIED BY "password123" DEFAULT TABLESPACE GOLDENGATE;
+
+GRANT CONNECT, RESOURCE, DBA TO GOLDENGATE;
+GRANT SELECT ANY DICTIONARY TO GOLDENGATE;
+GRANT SELECT ANY TABLE TO GOLDENGATE;
+GRANT FLASHBACK ANY TABLE TO GOLDENGATE;
+-- 192.168.1.101+ ve 12c+ için Integrated Extract yetkisi
+EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE('GOLDENGATE');
+```
+
+---
+
+## 3. GoldenGate Yazılım Kurulumu (GGSCI)
+
+Yazılımı kurduktan sonra `ggsci` arayüzüne girip gerekli dizin yapısını oluştururuz:
+
+```bash
+./ggsci
+GGSCI> CREATE SUBDIRS
+```
+
+### Manager Süreci Konfigürasyonu
+`MGR` süreci, diğer tüm süreçlerin orkestrasyonunu yapar.
+
+```bash
+GGSCI> EDIT PARAMS MGR
+-- İçerik:
+PORT 7809
+DYNAMICPORTLIST 7810-7820
+AUTORESTART EXTRACT *, RETRIES 3, WAITMINUTES 2
+PURGEOLDEXTRACTS ./dirdat/*, USECHECKPOINTS, MINKEEPDAYS 7
+```
+
+---
+
+## 4. Extract (Kaynak) Süreci Oluşturma
+
+Extract süreci, Online Redo Log'lardan veriyi okur ve `Trail File` adı verilen dosyalara yazar.
+
+```bash
+GGSCI> ADD EXTRACT E_PROD, TRANLOG, BEGIN NOW
+GGSCI> ADD EXTTRAIL ./dirdat/et, EXTRACT E_PROD
+
+-- Parametre dosyası (EDIT PARAMS E_PROD)
+EXTRACT E_PROD
+USERID GOLDENGATE, PASSWORD sifre
+EXTTRAIL ./dirdat/et
+TABLE HR.EMPLOYEES;
+```
+
+---
+
+## 5. Data Pump Süreci Oluşturma
+
+Data Pump, kaynak taraftaki Trail dosyalarını ağ üzerinden hedefe gönderir.
+
+```bash
+GGSCI> ADD EXTRACT P_PROD, EXTTRAILSOURCE ./dirdat/et
+GGSCI> ADD RMTTRAIL ./dirdat/rt, EXTRACT P_PROD
+
+-- Parametre dosyası (EDIT PARAMS P_PROD)
+EXTRACT P_PROD
+USERID GOLDENGATE, PASSWORD sifre
+RMTHOST 10.0.1.X, MGRPORT 7809
+RMTTRAIL ./dirdat/rt
+TABLE HR.EMPLOYEES;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **DDL Replikasyonu:** Eğer tablo yapısı değişikliklerini (CREATE/ALTER) de replike etmek istiyorsanız, Oracle 11g ve öncesinde özel DDL trigger'larını (`marker_setup.sql`, `ddl_setup.sql`) kurmalısınız. 12c ve üzerinde bu işlem çok daha otomatiktir.
+-   **Heartbeat Table:** Replikasyon gecikmesini ölçmek için her zaman bir `GGS_HEARTBEAT` tablosu kurun ve bir cron job ile 1 dakikada bir update edin.
+-   **DBLOGIN:** `ADD TRANDATA` gibi komutları çalıştırmadan önce mutlaka `DBLOGIN USERID goldengate, PASSWORD sifre` ile veritabanına bağlanın.
+
+Kurulumu doğru tamamlanan bir GoldenGate mimarisi, yüksek erişilebilirlik ve veri entegrasyonu projelerinizin en güvenilir parçası olacaktır.

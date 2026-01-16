@@ -1,0 +1,116 @@
+---
+title: "Oracle Veritabanında Stress Testi ve Performans Analizi"
+description: "Oracle veritabanında uygulama yükünü simüle etme, PL/SQL ile stres testi yapma, locking ve latch çekişmelerini analiz etme rehberi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Stress Test", "Performance Analysis", "PL/SQL", "Locking", "Concurrency", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Stress Testi ve Performans Analizi
+
+Veritabanı sistemleri canlıya alınmadan önce veya büyük bir donanım/parametre değişikliği sonrası performans sınırlarının test edilmesi gerekir. **Stress Testi**, veritabanının yoğun eşzamanlı (concurrency) yük altında nasıl davrandığını, hangi wait event'lerin oluştuğunu ve sistemin nerede tıkandığını görmek için yapılır. Bu makalede, PL/SQL kullanarak basit ama etkili bir stres testi senaryosunun nasıl kurulacağını ve sonuçların nasıl analiz edileceğini inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Stres Testi Yapmalıyız?
+
+1.  **Darboğaz Tespiti:** Sistemdeki CPU, I/O veya kilitlenme (locking) problemlerini önceden görmek.
+2.  **Kapasite Planlama:** Mevcut donanımın saniyede kaç transaction (TPS) kaldırabileceğini ölçmek.
+3.  **RAC Contention:** Cluster ortamlarında node'lar arası çekişmeyi (gc waits) test etmek.
+
+---
+
+## Stress Testi Senaryosu Kurulumu
+
+Testimiz, bir tabloya yoğun şekilde veri ekleyen ve aynı satırı (Counter) sürekli güncelleyerek kilitlenme yaratan iki veya daha fazla oturumdan oluşacak.
+
+### 1. Test Tablolarının Oluşturulması
+
+```sql
+-- Sayaç tablosu (Kilitlenme yaratmak için)
+CREATE TABLE stres_kontrol (sid NUMBER);
+INSERT INTO stres_kontrol VALUES (1);
+COMMIT;
+
+-- Veri yükü tablosu
+CREATE TABLE stres_test_data (
+    id NUMBER, 
+    val_num NUMBER, 
+    val_str VARCHAR2(100)
+);
+```
+
+### 2. Test Prosedürünün Hazırlanması
+
+Bu prosedür, döngü içerisinde sürekli `UPDATE`, `INSERT` ve `COMMIT` yaparak sistemi yorar.
+
+```sql
+CREATE OR REPLACE PROCEDURE run_stress_test(p_loop_count IN NUMBER) IS
+    l_start_time TIMESTAMP;
+    l_end_time   TIMESTAMP;
+    l_counter    NUMBER;
+BEGIN
+    l_start_time := SYSTIMESTAMP;
+    
+    FOR i IN 1..p_loop_count LOOP
+        -- Aynı satırı güncelleyerek çekişme yaratıyoruz
+        UPDATE stres_kontrol SET sid = sid + 1 RETURNING sid INTO l_counter;
+        
+        -- Veri ekleme
+        INSERT INTO stres_test_data VALUES (l_counter, i, 'TEST_DATA_' || i);
+        
+        -- Her işlemde commit yaparak log switch ve sync yükü bindiriyoruz
+        COMMIT;
+    END LOOP;
+    
+    l_end_time := SYSTIMESTAMP;
+    DBMS_OUTPUT.PUT_LINE('Test Bitti. Süre: ' || (l_end_time - l_start_time));
+END;
+/
+```
+
+---
+
+## Testin Uygulanması
+
+Stres testini anlamlı kılmak için aynı anda birden fazla oturumda (Session) bu prosedürü çalıştırmalısınız.
+
+1.  **Terminal 1:** `EXEC run_stress_test(50000);`
+2.  **Terminal 2:** `EXEC run_stress_test(50000);`
+3.  **Terminal 3:** `EXEC run_stress_test(50000);`
+
+---
+
+## Sonuçların Analizi (Olay Yerini İnceleme)
+
+Test çalışırken veya bittikten sonra şu verileri analiz etmelisiniz:
+
+### 1. En Çok Görülen Bekleme Olayları
+```sql
+SELECT event, 
+       total_waits, 
+       time_waited_micro / 1000000 AS time_waited_sec
+FROM v$system_event
+WHERE wait_class != 'Idle'
+ORDER BY time_waited_micro DESC;
+```
+
+### 2. Trace Dosyası ve TKPROF
+Eğer test prosedürü içinde `10046 trace` başlattıysanız, oluşan trace dosyasını TKPROF ile analiz ederek her bir adımın (parse, fetch, execute) ne kadar sürdüğünü görebilirsiniz.
+
+```bash
+tkprof orcl_ora_1234.trc output_rapor.txt
+```
+
+---
+
+## Dikkat Edilmesi Gerekenler
+
+-   **Redo Log Size:** Sık commit yapılan testler redo logları çok hızlı doldurur. Log switch beklemesi (`log file switch completion`) olup olmadığını kontrol edin.
+-   **Undo Tablespace:** Yoğun update işlemleri undo alanını bitirebilir.
+-   **Index Contention:** Test tablonuzda index varsa, index leaf block'larındaki kilitlenmeleri (`enq: TX - index contention`) gözlemleyebilirsiniz.
+
+## Özet
+
+Stress testi, veritabanınızın "zor zamanlardaki" dayanıklılığını ölçer. Yukarıdaki senaryoyu kullanarak uygulamanızın en yoğun anlarını simüle edebilir, production ortamına geçmeden önce kritik optimizasyonları (Index tuning, Log file yapılandırması vb.) yapabilirsiniz.

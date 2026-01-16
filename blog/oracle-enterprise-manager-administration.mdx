@@ -1,0 +1,84 @@
+---
+title: "Oracle Enterprise Manager (Cloud Control) Yönetimi ve Sorun Giderme"
+description: "Oracle Enterprise Manager (OEM) Cloud Control servislerinin yönetimi, Agent kurulumu ve yönetimi için emctl ve emcli komutları."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle OEM", "Cloud Control", "emctl", "emcli", "Management Agent", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Enterprise Manager (Cloud Control) Yönetimi
+
+**Oracle Enterprise Manager (OEM) Cloud Control**, yüzlerce veritabanını, sunucuyu ve middleware bileşenini tek bir merkezden izlemek ve yönetmek için kullanılan kurumsal bir platformdur. Ancak bu devasa platformun kendisi de (OMS ve Management Agents) düzenli bakım ve yönetim gerektirir.
+
+
+<!--truncate-->
+Bu makalede, OEM servislerini yönetmek ve yaygın sorunları gidermek için kullanılan temel komutlarını inceleyeceğiz.
+
+## 1. OMS (Oracle Management Server) Yönetimi
+
+OMS, Enterprise Manager'ın beynidir. Servislerin durumunu kontrol etmek ve başlatmak için `emctl` aracı kullanılır.
+
+### OMS Durumunu Kontrol Etme
+```bash
+$OMS_HOME/bin/emctl status oms
+```
+Bu komut; OMS, Admin Server ve yönetilen serverların (`EMGC_OMS1` vb.) durumunu, port bilgilerini ve URL adreslerini raporlar.
+
+### OMS Başlatma ve Durdurma
+```bash
+$OMS_HOME/bin/emctl start oms
+$OMS_HOME/bin/emctl stop oms -all
+```
+
+---
+
+## 2. Management Agent Yönetimi
+
+Agentlar, hedef sunucularda (target) koşan ve verileri OMS'e raporlayan uç noktalardır.
+
+### Agent Komutları
+```bash
+# Agent durumunu kontrol et
+emctl status agent
+
+# Agent'ı başlat/durdur
+emctl start agent
+emctl stop agent
+
+# Verileri anında OMS'e gönder (Upload)
+emctl upload agent
+
+# Agent'ın hangi OMS'e bağlı olduğunu gör
+emctl config agent getmaster
+```
+
+### Agent Sorun Giderme (Unreachable hatası)
+Eğer bir target "Unreachable" görünüyorsa, genellikle Agent ile OMS arasındaki sertifika veya bağlantı sorunu vardır. Agent'ı temizleyip (clearstate) tekrar senkronize etmeyi deneyebilirsiniz:
+
+```bash
+emctl clearstate agent
+emctl upload agent
+```
+
+---
+
+## 3. emcli ile Komut Satırı Yönetimi
+
+Arayüze girmeden target silmek, job oluşturmak veya konfigürasyon değiştirmek için `emcli` (EM Command Line Interface) kullanılır.
+
+```bash
+# Login olma
+./emcli login -username=sysman
+
+# Target silme örneği
+./emcli delete_target -name="hostname:host" -type="host"
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **OMS ve Repository:** OMS'in düzgün çalışması için "Repository Database"in ayakta ve erişilebilir olması şarttır.
+-   **Disk Alanı:** Agentların kurulu olduğu dizinlerde (`sysman/log`, `agent_inst/sysman/emd`) log dosyalarının aşırı büyümediğinden emin olun.
+-   **Sertifika Süreleri:** Agent ile OMS arasındaki haberleşme SSL üzerindendir. Sertifikaların süresinin dolması bağlantı hatalarına yol açar.
+
+Enterprise Manager, karmaşık sistemleri basitleştiren harika bir araçtır. Servislerin ve agentların sağlığını korumak, veritabanı izleme operasyonunuzun kesintisiz devam etmesini sağlar.

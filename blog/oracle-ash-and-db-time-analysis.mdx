@@ -1,0 +1,93 @@
+---
+title: "Oracle Performans Analizi: Active Session History (ASH) ve DB Time"
+description: "Oracle veritabanında DB Time kavramı, Active Session History (ASH) verileriyle performans trend analizi ve darboğazların tespiti için SQL yöntemleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle ASH", "DB Time", "Performance Tuning", "Active Session History", "AWR", "Wait Events"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Performans Analizi: Active Session History (ASH) ve DB Time
+
+Oracle Database performans tuning dünyasında en kritik iki kavram **DB Time** ve **ASH (Active Session History)**'dir. DB Time, veritabanının bir işi tamamlamak için harcadığı toplam süreyi (CPU + Wait Time) temsil ederken; ASH, her saniye örneklenen aktif oturumların bir fotoğrafını sunar. Bu verileri analiz ederek, veritabanının geçmişte yaşadığı performans krizlerini, "peak" saatlerini ve kaynak tüketim trendlerini net bir şekilde görebiliriz.
+
+
+<!--truncate-->
+## 1. DB Time Kavramı Nedir?
+
+DB Time, veritabanının kullanıcı taleplerine hizmet vermek için harcadığı zamandır. Sadece CPU süresini değil, aynı zamanda verinin diskten okunmasını (I/O) veya kilit beklemelerini (Lock) de içerir.
+
+**Formül:** `DB Time = CPU Time + Wait Time (non-idle)`
+
+Veritabanının genel yükünü anlamak için `V$SYS_TIME_MODEL` görünümünü kullanabiliriz:
+
+```sql
+SELECT stat_name, ROUND(value/1000000, 2) AS seconds 
+FROM v$sys_time_model 
+ORDER BY value DESC;
+```
+
+---
+
+## 2. Snapshot Bazlı DB Time Analizi
+
+Eğer veritabanındaki yükün zaman içindeki değişimini (trend) görmek istiyorsanız, AWR (Automatic Workload Repository) tablolarını sorgulamanız gerekir. Aşağıdaki sorgu, snapshot aralıklarında harcanan toplam DB Time miktarını saniye cinsinden verir:
+
+```sql
+SELECT to_char(END_INTERVAL_TIME, 'YYYYMMDD HH24:MI') as snapshot_time,
+       trunc(tm.value/1000000) as db_time_seconds,
+       trunc(sn.snap_id) as snap_id
+FROM dba_hist_snapshot sn, sys.wrh$_sys_time_model tm 
+WHERE sn.snap_id = tm.snap_id 
+  AND tm.instance_number = sn.instance_number 
+  AND tm.stat_id = 3649082374 -- DB Time stat_id
+ORDER BY 1;
+```
+
+---
+
+## 3. Active Session History (ASH) ile Yük Tespiti
+
+ASH verileri, veritabanında o an "gerçekten ne oluyor?" sorusunun yanıtıdır. `v$active_session_history` görünümü son birkaç dakikanın verisini tutarken, `dba_hist_active_sess_history` daha eski verilere ulaşmanızı sağlar.
+
+### Ortalama Aktif Oturum (Average Active Sessions - AAS) Hesabı
+Belirli bir zaman diliminde ortalama kaç oturumun aktif olduğunu bulmak, CPU darboğazını tespit etmek için harikadır:
+
+```sql
+SELECT sample_time, 
+       COUNT(*) as active_sessions
+FROM v$active_session_history
+WHERE sample_time > SYSDATE - INTERVAL '1' HOUR
+GROUP BY sample_time
+ORDER BY sample_time;
+```
+
+---
+
+## 4. Zaman Farkı Hesaplama Fonksiyonu (PL/SQL)
+
+Snapshot analizi yaparken iki zaman damgası arasındaki farkı saniye cinsinden bulmak için şu yardımcı fonksiyonu kullanabilirsiniz:
+
+```sql
+CREATE OR REPLACE FUNCTION timestamp_diff_in_seconds (ts1 IN TIMESTAMP, ts2 IN TIMESTAMP)
+RETURN NUMBER IS 
+    total_secs NUMBER;
+    diff INTERVAL DAY(9) TO SECOND(6);
+BEGIN
+    diff := ts2 - ts1;
+    total_secs := ABS(EXTRACT(SECOND FROM diff) + 
+                     EXTRACT(MINUTE FROM diff)*60 + 
+                     EXTRACT(HOUR FROM diff)*60*60 + 
+                     EXTRACT(DAY FROM diff)*24*60*60);
+    RETURN total_secs;
+END;
+/
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **AAS &gt; CPU Sayısı:** Eğer ortalama aktif oturum sayısı veritabanındaki fiziksel CPU (Core) sayısından yüksekse, oturumlar CPU almak için sırada bekliyor demektir.
+-   **AWR Alternatifi:** Bu SQL metodları, tam bir AWR raporu çekmeye vaktiniz olmadığında veya spesifik bir zaman dilimine "zoom" yapmak istediğinizde hayat kurtarır.
+-   **Resource Manager:** DB Time trendlerinde anormal artışlar görüyorsanız, `Oracle Resource Manager` ile kaynak limitleri belirlemeyi değerlendirin.
+
+Active Session History ve DB Time verilerini doğru okumak, bir DBA'yı "hata çözen" kişiden "sorun oluşmadan önlem alan" uzmanlığa taşır.

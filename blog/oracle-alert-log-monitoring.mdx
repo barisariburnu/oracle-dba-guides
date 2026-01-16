@@ -1,0 +1,216 @@
+---
+title: "Oracle Alert Log Monitoring ile Hata Tespiti"
+description: "Oracle alert log dosyasını analiz ederek ORA- hatalarını, sistem değişikliklerini ve kritik olayları otomatik tespit eden SQL monitoring scripti."
+date: 2026-01-16
+category: "Oracle Monitoring"
+tags: ["oracle", "alert log", "monitoring", "ora hataları", "error detection", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Alert Log Monitoring ile Hata Tespiti
+
+Oracle veritabanı yöneticilerinin en önemli görevlerinden biri, alert log dosyasını düzenli olarak izlemek ve olası sorunları proaktif olarak tespit etmektir. Bu makalede, alert log analizini otomatize eden kapsamlı bir monitoring scripti sunacağım.
+
+
+<!--truncate-->
+## Alert Log Nedir?
+
+Oracle alert log dosyası, veritabanının tüm önemli olaylarını kaydeden merkezi bir log dosyasıdır. Bu dosyada şunlar bulunur:
+
+- ORA- hataları
+- Veritabanı başlatma/durdurma işlemleri
+- ALTER SYSTEM ve ALTER DATABASE komutları
+- Block corruption errors
+- Deadlock hataları
+- ve daha birçok kritik olay
+
+## Script Özellikleri
+
+Bu monitoring scripti şu özellikleri sunar:
+
+- Son 24 saat içindeki alert log kayıtlarını raporlar
+- ORA- hatalarını otomatik filtreler
+- ERROR mesajlarını tespit eder
+- ALTER SYSTEM ve ALTER DATABASE komutlarını izler
+- İki farklı raporlama modu sunar (detaylı ve özet)
+- Hata sayılarını gruplandırarak gösterir
+
+<Callout type="info" title="Önemli Not">
+Bu script, `X$DBGALERTEXT` view'ini kullanarak alert log dosyasına doğrudan erişim sağlar. Bu view Oracle internal bir view'dir ve SYSDBA yetkisi gerektirir.
+</Callout>
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri versiyon
+- SYSDBA yetkisi
+- `X$DBGALERTEXT` view'ine erişim
+
+## Script İçeriği
+
+### Version 1: Detaylı Kayıtlar
+
+Bu versiyon, tüm detayları birlikte gösterir:
+
+```sql
+set linesize 150
+set pagesize 150
+
+SELECT SUBSTR (MESSAGE_TEXT, 1, 300) MESSAGE_TEXT,
+       TO_CHAR (ORIGINATING_TIMESTAMP, 'DD-MON-YYYY HH24:MI:SS') Occur_date
+  FROM X$DBGALERTEXT
+ WHERE     (MESSAGE_TEXT LIKE '%ORA-%'
+         OR UPPER (MESSAGE_TEXT) LIKE '%ERROR%'
+         OR UPPER (MESSAGE_TEXT) LIKE '%ALTER SYSTEM%'
+         OR UPPER (MESSAGE_TEXT) LIKE '%ALTER DATABASE%')
+       AND CAST (ORIGINATING_TIMESTAMP AS DATE) > SYSDATE - 1
+ORDER BY ORIGINATING_TIMESTAMP DESC;
+```
+
+### Version 2: Hata Sayıları (Özet Rapor)
+
+Bu versiyon, aynı hataların kaç kez tekrarlandığını gruplar:
+
+```sql
+set linesize 150
+set pagesize 150
+
+SELECT SUBSTR (MESSAGE_TEXT, 1, 300) MESSAGE_TEXT, COUNT (*) cnt
+  FROM X$DBGALERTEXT
+ WHERE     (MESSAGE_TEXT LIKE '%ORA-%'
+         OR UPPER (MESSAGE_TEXT) LIKE '%ERROR%')
+       AND CAST (ORIGINATING_TIMESTAMP AS DATE) > SYSDATE - 1
+GROUP BY SUBSTR (MESSAGE_TEXT, 1, 300)
+ORDER BY cnt DESC;
+```
+
+## Kullanım
+
+Script'i SQL*Plus ile çalıştırabilirsiniz:
+
+```bash
+sqlplus -s / as sysdba @alert.sql
+```
+
+## Çıktı Formatı
+
+### Version 1: Detaylı Kayıtlar
+
+| Sütun | Açıklama |
+|-------|----------|
+| MESSAGE_TEXT | Mesaj metni (ilk 300 karakter) |
+| OCCUR_DATE | Olayın gerçekleştiği tarih ve saat |
+
+### Version 2: Hata Sayıları
+
+| Sütun | Açıklama |
+|-------|----------|
+| MESSAGE_TEXT | Mesaj metni (ilk 300 karakter) |
+| CNT | Bu hatanın kaç kez tekrarlandığı |
+
+## Filtrelenen Olaylar
+
+Script şu olay türlerini filtreler:
+
+- **ORA- hataları**: Tüm Oracle hata kodları (ORA-00600, ORA-01555, vb.)
+- **ERROR**: Tüm hata mesajları
+- **ALTER SYSTEM**: Sistem parametre değişiklikleri
+- **ALTER DATABASE**: Veritabanı yapılandırma değişiklikleri
+
+## Kullanım Senaryoları
+
+### 1. Günlük Hata Kontrolü
+
+Her gün çalıştırarak son 24 saatin hatalarını izleyin:
+
+```bash
+# Cron job örneği
+0 8 * * * /u01/app/oracle/scripts/alert_check.sh
+```
+
+### 2. Sistem Değişikliklerini İzleme
+
+ALTER SYSTEM ve ALTER DATABASE komutlarını takip ederek yetkisiz değişiklikleri tespit edin.
+
+### 3. Hata Trend Analizi
+
+Version 2 scripti ile en sık tekrarlayan hataları identify edin ve kök neden analizi yapın.
+
+### 4. Monitoring Sistemlerine Entegrasyon
+
+Script çıktısını Nagios, Zabbix, veya Enterprise Manager gibi monitoring sistemlerine entegre edin.
+
+<Callout type="warning" title="Uyarı">
+Alert log analizi sadece sorun tespiti için yeterli değildir. Tespit edilen hataların kök neden analizi mutlaka yapılmalı ve önleyici tedbirler alınmalıdır.
+</Callout>
+
+## Örnek Çıktı
+
+### Version 1 Çıktısı
+
+```
+MESSAGE_TEXT                                      OCCUR_DATE
+------------------------------------------------- -------------------
+ORA-01555 caused by SQL statement below          16-JAN-2026 08:23:45
+ALTER SYSTEM SET open_cursors=1000 SCOPE=BOTH   16-JAN-2026 07:15:30
+ORA-00060: deadlock detected while waiting       16-JAN-2026 06:45:12
+Error in file /u01/app/oracle/diag/rdbms/...    16-JAN-2026 05:30:22
+```
+
+### Version 2 Çıktısı
+
+```
+MESSAGE_TEXT                                      CNT
+------------------------------------------------- ----------
+ORA-01555 caused by SQL statement below            15
+Error in file /u01/app/oracle/diag/rdbms/...       8
+ORA-00060: deadlock detected                        3
+```
+
+## Performans İpuçları
+
+1. **Raporlama Aralığı**: Yoğun veritabanlarında aralığı 12 saate düşürün
+2. **Mesaj Uzunluğu**: İhtiyaca göre 300 karakter sınırını ayarlayın
+3. **Historik Veri**: Daha uzun dönemli analiz için `SYSDATE - 7` kullanın
+4. **Otomasyon**: Script'i cron job'a ekleyerek otomatik hale getirin
+
+## Entegrasyon Örnekleri
+
+### Bash Script Entegrasyonu
+
+```bash
+#!/bin/bash
+# alert_check.sh
+
+sqlplus -s / as sysdba @alert.sql > /tmp/alert_report.txt
+
+# Hata sayısını kontrol et
+error_count=$(grep -c "ORA-" /tmp/alert_report.txt)
+
+if [ $error_count -gt 10 ]; then
+    echo "KRITIK: $error_count hata tespit edildi!" | mail -s "Alert Log Alarm" dba@company.com
+fi
+```
+
+## İlgili Görünümler
+
+- `X$DBGALERTEXT` - Alert log içeriği (internal)
+- `V$DIAG_INFO` - Diagnostic dest bilgileri
+- `V$ALERT_TYPE` - Alert tip tanımları
+
+## Kaynaklar
+
+- [Oracle Database Alert Log Documentation](https://docs.oracle.com/en/database/)
+- Automatic Diagnostic Repository (ADR) kullanımı
+- Oracle Support - Alert Log Analysis Best Practices
+
+## Sonraki Adımlar
+
+Bu scripti temel alarak şunları yapabilirsiniz:
+
+- E-mail veya SMS ile alarm entegrasyonu
+- Dashboard görselleştirmesi (Grafana, Kibana)
+- Hata kategorizasyonu ve severity seviyeleri
+- Otomatik remediation scriptleri
+- Trend analizi ve capacity planning
+
+Bu alert log monitoring scripti ile veritabanınızın sağlığını proaktif olarak izleyebilir ve olası sorunları kullanıcıları etkilemeden çözebilirsiniz.

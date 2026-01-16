@@ -1,0 +1,97 @@
+---
+title: "Oracle DBA İçin Kritik Shell Scriptler: ASM ve DataGuard İzleme"
+description: "Linux üzerinde Oracle veritabanı yönetimi için ASM disk doluluğu, DataGuard senkronizasyon (lag) durumu ve otomatik mail bildirimlerini içeren profesyonel shell script rehberi."
+date: "2026-01-16"
+category: "Linux"
+tags: ["Oracle Scripts", "Shell Scripting", "ASM Monitoring", "DataGuard Lag", "DBA Automation", "Linux"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle DBA İçin Kritik Shell Scriptler: ASM ve DataGuard İzleme
+
+Bir Oracle DBA olarak onlarca veritabanını yönetirken her birine tek tek girip manuel kontrol yapmak imkansıza yakındır. Bu nedenle, kritik eşik değerlerini (`Threshold`) kontrol eden ve bir sorun olduğunda mail atan "Watchdog" scriptleri hayati önem taşır. Bu makalede, ASM (Automatic Storage Management) disk doluluğunu ve DataGuard senkronizasyon (lag) durumunu proaktif olarak izleyen profesyonel bash script yapılarını inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. ASM Disk Doluluğu İzleme Scripti
+
+ASM disk grupları dolduğunda veritabanı aniden durabilir. Aşağıdaki script, disk grubu doluluğu %95'i aştığında (yani boş alan %5'in altına düştüğünde) uyarı raporu üretir.
+
+```bash
+#!/bin/bash
+# ASM Space Monitoring Script
+
+export ORACLE_HOME=/u01/app/grid/product/19.0.0/grid
+export ORACLE_SID=+ASM1
+export PATH=$PATH:$ORACLE_HOME/bin
+
+# Fonksiyon: %5'in altındaki boş alanları bul
+check_asm_usage() {
+    sqlplus -s "/ as sysasm" <<EOF
+    SET FEEDBACK OFF
+    SET LINESIZE 200
+    SELECT name, 
+           total_mb, 
+           free_mb, 
+           ROUND((free_mb/total_mb)*100) AS pct_free 
+    FROM v\$asm_diskgroup 
+    WHERE ROUND((free_mb/total_mb)*100) <= 5;
+EOF
+}
+
+# Raporu kontrol et ve mail at
+report=$(check_asm_usage)
+if [ ! -z "$report" ] && [[ $report != *"no rows selected"* ]]; then
+    echo "$report" | mail -s "KRITIK: ASM Disk Doluluk Uyarı - $(hostname)" dba@company.com
+fi
+```
+
+---
+
+## 2. DataGuard Lag (Gecikme) Kontrolü
+
+Standby veritabanının primary ile ne kadar uyumlu olduğunu izlemek, felaket anında veri kaybı yaşamamak için kritiktir. 5 dakikadan fazla gecikme (lag) durumunda uyarı veren script yapısı:
+
+```sql
+-- SQL tarafındaki kontroller
+SELECT name, value FROM v$dataguard_stats WHERE name LIKE '%lag%';
+```
+
+Bash script entegrasyonu:
+
+```bash
+#!/bin/bash
+# DataGuard Lag Monitoring
+
+dg_lag_report() {
+    sqlplus -s "/ as sysdba" <<EOF
+    SET PAGESIZE 0 FEEDBACK OFF verify OFF linesize 200
+    SELECT value FROM v\$dataguard_stats WHERE name = 'apply lag';
+EOF
+}
+
+lag_value=$(dg_lag_report | awk -F: '{print $2}' | tr -d ' ')
+# Eğer lag 5 dakikadan (300 saniye) fazlaysa mail at
+if [ ! -z "$lag_value" ] && [ "$lag_value" -gt 300 ]; then
+    echo "Standby veritabaninda $lag_value saniye gecikme tespit edildi!" | mail -s "DataGuard Lag Uyarısı" dba@example.com
+fi
+```
+
+---
+
+## 3. Merkezi Kontrol Scripti (Watchdog)
+
+Tüm kontrollerinizi tek bir `monitor.sh` içinde toplayıp her 5 dakikada bir çalıştırılacak şekilde `crontab`'a ekleyebilirsiniz.
+
+```bash
+# Her 5 dakikada bir asmkontrol ve dglagkontrol calistir
+*/5 * * * * /home/oracle/scripts/monitor.sh > /dev/null 2>&1
+```
+
+## Özet ve İpuçları
+
+-   **Hata Yönetimi:** Scriptlerinizde mutlaka `ORACLE_HOME` ve `LD_LIBRARY_PATH` gibi ortam değişkenlerini (env) açıkça belirtin; cron job'lar bu değişkenleri otomatik olarak tanımaz.
+-   **Loglama:** Script çıktılarını her zaman bir log dosyasına yönlendirin ki geriye dönük hata analizi yapabilesiniz.
+-   **Güvenlik:** Şifreleri script içinde tutmak yerine `/ as sysdba` (OS authentication) kullanmayı tercih edin.
+
+Bu scriptler, veritabanı yönetimini reaktif (hata olduktan sonra müdahale) olmaktan çıkarıp proaktif (hata olmadan önlem alma) bir seviyeye taşıyacaktır.

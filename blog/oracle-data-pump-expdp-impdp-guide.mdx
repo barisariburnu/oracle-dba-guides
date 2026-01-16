@@ -1,0 +1,85 @@
+---
+title: "Oracle Veri Taşıma: Data Pump (Expdp/Impdp) İpuçları"
+description: "Oracle veritabanında Data Pump (expdp/impdp) kullanarak veri transferi, şema taşıma, LOB objesi hataları ve uzun süren jobları yönetme rehberi."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Data Pump", "expdp", "impdp", "Data Migration", "DBA", "LOB Export"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veri Taşıma: Data Pump (Expdp/Impdp) İpuçları
+
+Veritabanı yöneticileri (DBA) için bir şemayı veya tüm veritabanını bir yerden başka bir yere taşımak en kritik operasyonlardan biridir. Oracle, bu iş için eski `exp/imp` araçlarının yerine çok daha hızlı ve esnek olan **Data Pump** (`expdp`/`impdp`) araçlarını sunar. Data Pump, sunucu taraflı çalışır ve paralel işlem yeteneği sayesinde devasa boyutlardaki verileri saatler içinde taşıyabilir. Bu makalede, Data Pump kullanımında hayat kurtaran ipuçlarını ve sık karşılaşılan hataların çözümlerini inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Temel expdp ve impdp Kullanımı
+
+Data Pump kullanmadan önce veritabanında bir `DIRECTORY` nesnesi oluşturulmuş ve fiziksel işletim sistemi dizini ile eşleştirilmiş olmalıdır.
+
+```sql
+-- Dizin Oluşturma
+CREATE DIRECTORY dpump_dir AS '/u02/export';
+GRANT READ, WRITE ON DIRECTORY dpump_dir TO hr;
+```
+
+### Şema Export Etme
+```bash
+expdp hr/sifre@servis DIRECTORY=dpump_dir DUMPFILE=hr_schema.dmp LOGFILE=hr_exp.log SCHEMAS=hr PARALLEL=4
+```
+
+### Şema Import Etme (Farklı Kullanıcıya)
+```bash
+impdp system/sifre DIRECTORY=dpump_dir DUMPFILE=hr_schema.dmp REMAP_SCHEMA=hr:hr_new LOGFILE=hr_imp.log
+```
+
+---
+
+## 2. Karşılaşılan Sık Sorunlar ve Çözümleri
+
+### A. LOB Objesi Export Hatası (ORA-01555)
+Büyük LOB kolonları içeren tablolarda export sırasında "Snapshot too old" hatası alıyorsanız, `FLASHBACK_SCN` veya `FLASHBACK_TIME` parametresini kullanarak tutarlı bir anı sabitleyin:
+
+```bash
+expdp system/sifre DIRECTORY=dpump_dir DUMPFILE=lob_table.dmp FLASHBACK_TIME=SYSTIMESTAMP
+```
+
+### B. Job'ı Durdurma ve Kill Etme
+Bazen bir export job'ı yanlış başlamış olabilir ve arkaplanda çalışmaya devam eder. Bunu durdurmak için:
+
+```bash
+-- Job listesini gör
+SELECT owner_name, job_name, operation, state FROM dba_datapump_jobs;
+
+-- Job'a bağlan (Attach)
+# expdp system/sifre ATTACH=job_name
+Export> stop_job=immediate
+Export> kill_job
+```
+
+---
+
+## 3. DBMS_FILE_TRANSFER (Uzaktaki Sunucuya Dosya Atma)
+
+Eğer export dosyasını ağ üzerinden başka bir veritabanı sunucusuna kopyalamak istiyorsanız, `DBMS_FILE_TRANSFER` paketi çok pratiktir:
+
+```sql
+BEGIN
+  DBMS_FILE_TRANSFER.GET_FILE(
+    source_directory_object      => 'SOURCE_DIR',
+    source_file_name             => 'export.dmp',
+    source_database_link         => 'remote_link',
+    destination_directory_object => 'LOCAL_DIR',
+    destination_file_name        => 'export_copied.dmp'
+  );
+END;
+/
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Paralellik:** `PARALLEL` parametresini CPU sayınızın 1-2 katı olarak ayarlayarak hızı artırabilirsiniz. (Ancak disk I/O hızınızı da göz önünde bulundurun).
+-   **İstatistikler:** Import yaparken `EXCLUDE=STATISTICS` kullanarak işlemi hızlandırabilir ve sonrasında manuel olarak istatistik toplayabilirsiniz.
+-   **Kısıtlar (Table_Exists_Action):** Eğer tablo hedefte zaten varsa `TABLE_EXISTS_ACTION=APPEND` veya `REPLACE` parametrelerini ihtiyacınıza göre kullanın.
+
+Data Pump, esnek yapısı ve güçlü parametreleriyle veri taşıma işlemlerini profesyonel bir seviyeye taşır. Doğru konfigürasyonla TB'larca veriyi güvenle transfer edebilirsiniz.

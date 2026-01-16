@@ -1,0 +1,95 @@
+---
+title: "Oracle Oturum Kaynak Kullanımı: CPU, TEMP ve UNDO Analizi"
+description: "Oracle veritabanında en çok CPU, TEMP ve UNDO tüketen oturumları (session) tespit etme, uzun süren transactionları izleme ve kaynak yönetimi rehberi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Monitoring", "CPU Usage", "TEMP Usage", "UNDO Usage", "Session Tracking", "DBA Troubleshooting"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Oturum Kaynak Kullanımı: CPU, TEMP ve UNDO Analizi
+
+Veritabanı performans sorunları genellikle tüm sistemi etkileyen genel bir yavaşlama olarak değil, belirli oturumların (session) aşırı kaynak tüketmesi şeklinde başlar. Bir raporun devasa bir `TEMP` alanı kullanması veya bir toplu işlemin `UNDO` tablespace'ini doldurması tüm veritabanını felç edebilir. Bir DBA olarak, "Sistemi kim yoruyor?" sorusuna anlık ve net yanıtlar vermeliyiz. Bu makalede, CPU, TEMP ve UNDO tüketen oturumları tespit eden kritik scriptleri inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. En Çok CPU Tüketen Oturumlar
+
+CPU kullanımı, genellikle inefficient join'ler veya aşırı logical I/O yapan sorgulardan kaynaklanır. Anlık olarak en yüksek CPU değerine sahip sessionları bulmak için:
+
+```sql
+SELECT s.sid, 
+       s.serial#, 
+       p.spid AS "OS_PID", 
+       s.username, 
+       s.module, 
+       st.value/100 AS "cpu_sec"
+FROM v$session s, v$sesstat st, v$statname sn, v$process p
+WHERE st.sid = s.sid
+  AND st.statistic# = sn.statistic#
+  AND sn.name = 'CPU used by this session'
+  AND s.paddr = p.addr
+  AND s.status = 'ACTIVE'
+  AND s.username IS NOT NULL
+ORDER BY st.value DESC;
+```
+
+---
+
+## 2. TEMP (Sort) Alanı Kullanan Oturumlar
+
+Büyük sıralama (ORDER BY) veya hash join işlemleri belleğe sığmadığında `TEMP` tablespace'ini kullanır. TEMP doluluğu alan yetersizliği hatalarına (ORA-01652) neden olur.
+
+```sql
+SELECT s.sid || ',' || s.serial# AS "SID_SERIAL", 
+       s.username,
+       su.blocks * t.block_size / 1024 / 1024 AS "MB_USED", 
+       su.tablespace,
+       sq.sql_text
+FROM v$sort_usage su
+JOIN v$session s ON su.session_addr = s.saddr
+JOIN dba_tablespaces t ON su.tablespace = t.tablespace_name
+LEFT JOIN v$sqlarea sq ON su.sqladdr = sq.address
+ORDER BY "MB_USED" DESC;
+```
+
+---
+
+## 3. En Çok UNDO Tüketen ve Uzun Süren Transactionlar
+
+Açık kalan transactionlar veya devasa UPDATE/DELETE işlemleri `UNDO` alanını şişirir ve `snapshot too old` hatalarına yol açabilir.
+
+### En Çok UNDO Kullananlar
+```sql
+SELECT s.sid, 
+       s.username, 
+       t.used_ublk * (SELECT value FROM v$parameter WHERE name = 'db_block_size') / 1024 / 1024 AS "UNDO_MB",
+       t.start_time
+FROM v$transaction t
+JOIN v$session s ON t.ses_addr = s.saddr
+ORDER BY "UNDO_MB" DESC;
+```
+
+### 1 Saatten Uzun Süren Aktif İşlemler
+```sql
+SELECT s.sid, 
+       s.serial#, 
+       s.username, 
+       s.start_time,
+       (SYSDATE - TO_DATE(t.start_time, 'MM/DD/YY HH24:MI:SS')) * 24 AS "HOURS_ACTIVE"
+FROM v$transaction t
+JOIN v$session s ON t.ses_addr = s.saddr
+WHERE (SYSDATE - TO_DATE(t.start_time, 'MM/DD/YY HH24:MI:SS')) * 24 > 1;
+```
+
+---
+
+## Analiz Sonrası Müdahale Stratejileri
+
+1.  **TEMP Problemi:** Eğer bir sorgu GB'larca TEMP kullanıyorsa, `ORDER BY` veya `GROUP BY` kolonlarındaki index durumunu kontrol edin. Parallel query'lerin TEMP kullanımını katladığını unutmayın.
+2.  **CPU Problemi:** "CPU used by this session" metriği yüksekse, sorgunun `execution plan`'ına bakın. Muhtemelen yanlış bir join sırası veya full scan vardır.
+3.  **UNDO Problemi:** Uzun süren transaction'lar (`V$TRANSACTION`) genellikle uygulama tarafında commit unutulmasından kaynaklanır. Gerekirse bu session'ları sonlandırın.
+
+## Özet
+
+Kaynak yönetimi, veritabanı stabilitesinin anahtarıdır. CPU, TEMP ve UNDO istatistiklerini düzenli izleyerek, tek bir oturumun tüm sistemi istikrarsızlaştırmasını engelleyebilirsiniz. Bu scriptleri günlük DBA check-list'inize eklemenizi öneririm.

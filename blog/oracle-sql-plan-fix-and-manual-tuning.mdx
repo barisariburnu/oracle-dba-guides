@@ -1,0 +1,94 @@
+---
+title: "Oracle SQL Plan Fixleme: Problemli Planları Manuel Düzeltme"
+description: "Oracle veritabanında yavaşlayan veya yanlış plan seçen SQL sorgularını (SQL_ID) manuel olarak sabitleme, SQL Plan Baseline ve Shared Pool müdahale teknikleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Plan Fix", "SQL_ID", "Shared Pool", "PURGE", "SQL Plan Baseline", "Performance Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Plan Fixleme: Problemli Planları Manuel Düzeltme
+
+Veritabanında çalışan bir sorgunun planı aniden değiştiğinde veya CBO (Optimizer) yanlış bir plan seçtiğinde, DBA'nın hızlı müdahale etmesi gerekir. Bu durum genellikle istatistiklerin değişmesi veya bind variable peek sorunu nedeniyle oluşur. Bu makalede, problemli bir planı nasıl tespit edeceğinizi ve manuel olarak nasıl düzelteceğinizi (fixleme), ayrıca Shared Pool'dan belirli bir sorguyu nasıl temizleyeceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Problemli Sorguyu Tespit Etme
+
+İlk adım, sistemde yavaşlığa neden olan veya yanlış plan seçen `SQL_ID`'yi bulmaktır. Genellikle bu sorgular `active_session_history`'de veya `v$session`'da uzun süre `User I/O` beklemesiyle görünürler.
+
+```sql
+SELECT sql_id, child_number, plan_hash_value, executions, elapsed_time/1000000 AS elapsed_sec
+FROM v$sql
+WHERE sql_id = 'target_sql_id_here';
+```
+
+---
+
+## 2. Shared Pool'dan Tek Bir Sorguyu Silme (PURGE)
+
+Bazen sorguyu Shared Pool'dan temizlemek, Oracle'ın sorguyu tekrar parse etmesini (hard parse) ve daha iyi bir plan seçmesini sağlayabilir. Tüm Shared Pool'u temizlemek (`flush shared_pool`) yerine sadece ilgili SQL'i temizlemek en iyi uygulamadır.
+
+```sql
+-- SQL_ID'ye ait Adres ve Hash değerlerini bulun
+SELECT address, hash_value 
+FROM v$sqlarea 
+WHERE sql_id = '5xqm3n6t5k8b2';
+
+-- DBMS_SHARED_POOL.PURGE ile temizleyin
+-- 'C' parametresi Cursor (SQL) anlamına gelir
+EXEC DBMS_SHARED_POOL.PURGE('ADDRESS_BURAYA, HASH_VALUE_BURAYA', 'C');
+```
+
+---
+
+## 3. SQL Plan Baseline ile Belirli Bir Planı Sabitleme
+
+Eğer Shared Pool'u temizlemek işe yaramazsa veya Oracle sürekli yanlış planı seçmekte ısrar ediyorsa, doğru planı (eğer bellekte hala varsa) sabitleyebilirsiniz.
+
+```sql
+DECLARE
+  l_plans_loaded PLS_INTEGER;
+BEGIN
+  -- SQL_ID ve doğru olduğunu bildiğiniz PLAN_HASH_VALUE'yu kullanın
+  l_plans_loaded := DBMS_SPM.LOAD_PLANS_FROM_CURSOR_CACHE(
+    sql_id          => '5xqm3n6t5k8b2',
+    plan_hash_value => 1234567890,
+    fixed           => 'YES'
+  );
+  
+  DBMS_OUTPUT.PUT_LINE('Yüklenen Plan Sayısı: ' || l_plans_loaded);
+END;
+/
+```
+
+---
+
+## 4. SQL Profile ile Müdahale
+
+Tuning Advisor'ın önerdiği bir profil varsa veya manuel bir profil oluşturulacaksa:
+
+```sql
+-- Mevcut bir profili kontrol edin
+SELECT name, status FROM dba_sql_profiles WHERE name LIKE '%PROFIL_ADI%';
+
+-- Gerekiyorsa profili pasife çekin
+BEGIN
+  DBMS_SQLTUNE.ALTER_SQL_PROFILE(
+    name           => 'SYS_SQLPROF_014de7acf05a0006',
+    attribute_name => 'STATUS',
+    value          => 'DISABLED'
+  );
+END;
+/
+```
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **Nokta Atışı Temizlik:** Asla tüm Shared Pool'u durduk yere boşaltmayın; sadece sorunlu `SQL_ID`'yi `PURGE` edin.
+-   **Plan Takibi:** `V$SQL_PLAN` üzerinden her iki planı (eski ve yeni) karşılaştırarak neden yanlış plan seçildiğini (index skip scan, full scan vb.) analiz edin.
+-   **Baseline Önceliği:** `Fixed => 'YES'` olan baseline'lar her zaman diğerlerine tercih edilir. Bu, kritik rapor sorgularının stabilize edilmesi için en güvenli yoldur.
+
+Bu yöntemlerle, veritabanı performansındaki dalgalanmaları kontrol altına alabilir ve kullanıcı şikayetlerine saniyeler içinde çözüm üretebilirsiniz.

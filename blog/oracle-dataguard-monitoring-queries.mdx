@@ -1,0 +1,416 @@
+---
+title: "Oracle Data Guard Monitoring Scriptleri - Complete Monitoring Queries"
+description: "Oracle Data Guard standby database monitoring scriptleri. MRP process, archivelog apply, transport lag, recovery progress ve gap detection SQL queryleri."
+date: 2025-01-16
+category: "Oracle Data Guard"
+tags: ["oracle", "dataguard", "standby", "monitoring", "rman", "dba", "recovery"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Monitoring Scriptleri
+
+Oracle Data Guard ortamlarında standby database'in **senkronizasyon durumu**, **apply rate**, **transport lag** ve **gap analysis** gibi kritik metriklerin düzenli olarak monitoring edilmesi gerekmektedir. Bu yazıda production ortamlarında kullanılan **kapsamlı monitoring scriptleri** paylaşacağım.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Data Guard monitoring'de en kritik göstergeler: apply lag, transport lag ve MRP process durumudur. Bu metrikler düzenli kontrol edilmelidir.
+</Callout>
+
+## Script'in Amacı
+
+Bu scriptler Data Guard ortamında şu monitoring işlemlerini yapar:
+
+- **MRP ve RFS process** durumlarını izleme
+- **Archivelog apply** durumunu görüntüleme
+- **Transport ve apply lag** hesaplama
+- **Recovery progress** ve apply rate izleme
+- **Gap detection** ve çözümü
+- **Primary-Standby** zaman farkını ölçme
+
+## Önkoşullar
+
+- **Oracle Data Guard** konfigüre edilmiş olmalı
+- **Physical standby database** aktif olmalı
+- **Archivelog mode** aktif olmalı
+- **DBA yetkisi** gerekli
+
+## Data Guard Monitoring Scriptleri
+
+### 1. Managed Standby Process Kontrolü
+
+```sql
+-- Standby tarafında MRP ve RFS process'lerinin durumunu görüntüle
+-- Archivelog'ların taşınıp apply edildiğini kontrol et
+SELECT process,
+       status,
+       thread#,
+       sequence#,
+       block#,
+       blocks
+FROM v$managed_standby;
+```
+
+**Çıktı Örneği:**
+
+```
+PROCESS   STATUS          THREAD#  SEQUENCE#     BLOCK#     BLOCKS
+--------- ------------ ---------- ---------- ---------- ----------
+ARCH      CLOSING               1      69479     932864        261
+ARCH      CLOSING               1      69475     943104         79
+RFS       IDLE                  0          0          0          0
+RFS       RECEIVING             1      69481     688130       1024
+MRP0      WAIT_FOR_LOG          2      78080          0          0
+```
+
+**Analiz:**
+- **MRP0:** Media Recovery Process - standby'da redo apply çalışır
+- **RFS:** Remote File Server - archivelog'ları alır
+- **ARCH:** Archive process - archivelog yönetimi
+
+### 2. Apply Edilen Son Sequence
+
+```sql
+-- Her thread için apply edilen en son archivelog sequence number
+SELECT thread#, MAX(sequence#) AS last_applied_seq
+FROM v$archived_log
+WHERE applied = 'YES'
+GROUP BY thread#
+ORDER BY thread#;
+```
+
+**Çıktı:**
+
+```
+   THREAD# MAX(SEQUENCE#)
+---------- --------------
+         1          69479
+         2          78079
+```
+
+### 3. Archivelog Difference (Primary)
+
+```sql
+-- Primary database'de archivelog farkını kontrol et
+-- Real-time apply için geçerli değildir
+ALTER SESSION SET nls_date_format = 'DD-MON-YYYY HH24:MI:SS';
+
+SELECT a.thread#,
+       b.last_seq,
+       a.applied_seq,
+       a.last_app_timestamp,
+       b.last_seq - a.applied_seq AS arc_diff
+FROM (SELECT thread#,
+             MAX(sequence#) AS applied_seq,
+             MAX(next_time) AS last_app_timestamp
+      FROM gv$archived_log
+      WHERE applied = 'YES'
+      GROUP BY thread#) a,
+     (SELECT thread#, MAX(sequence#) AS last_seq
+      FROM gv$archived_log
+      GROUP BY thread#) b
+WHERE a.thread# = b.thread#;
+```
+
+**Çıktı Analizi:**
+
+```
+   THREAD#   LAST_SEQ APPLIED_SEQ LAST_APP_TIMESTAMP     ARC_DIFF
+---------- ---------- ----------- -------------------- ----------
+         2      78083       78082 01-JUL-2013 16:05:25          1
+         1      69486       69485 01-JUL-2013 16:08:21          1
+```
+
+**ARC_DIFF = 1** normaldir (şu anda apply edilmekte olan log).
+
+### 4. Data Guard Stats - Apply Lag
+
+```sql
+-- Standby senkronizasyon durumunu görüntüle
+SET lines 2000
+COL name FORMAT a40
+COL value FORMAT a20
+SELECT * FROM v$dataguard_stats;
+```
+
+**Çıktı:**
+
+```
+NAME                     VALUE             UNIT        TIME_COMPUTED
+------------------------ ----------------- ------      ---------------------
+transport lag            +00 00:09:44      day         07/01/2013 15:49:29
+apply lag                +00 00:09:44      day         07/01/2013 15:49:29
+apply finish time        +00 00:00:00.001  day         07/01/2013 15:49:29
+estimated startup time   27                second      07/01/2013 15:49:29
+```
+
+<Callout type="warning" title="Uyarı">
+Apply lag 30 dakikayı aşarsa:
+1. Network bağlantısını kontrol edin
+2. MRP process durumunu kontrol edin
+3. Archivelog shipping'i doğrulayın
+4. Disk alanını kontrol edin
+</Callout>
+
+### 5. Recovery Progress - Apply Rate
+
+```sql
+-- Media recovery hızını görüntüle
+SET lines 2000
+COL type FORMAT a30
+COL item FORMAT a20
+COL comments FORMAT a20
+SELECT * FROM v$recovery_progress;
+```
+
+**Çıktı:**
+
+```
+START_TIM TYPE             ITEM                 UNITS        SOFAR      TOTAL
+--------- ---------------- -------------------- ------------------ ---------- ----------
+20-JUN-13 Media Recovery   Log Files            Files         3363          0
+20-JUN-13 Media Recovery   Active Apply Rate    KB/sec       21584          0
+20-JUN-13 Media Recovery   Average Apply Rate   KB/sec        3239          0
+20-JUN-13 Media Recovery   Maximum Apply Rate   KB/sec       48913          0
+20-JUN-13 Media Recovery   Redo Applied         Megabytes  2953165          0
+20-JUN-13 Media Recovery   Last Applied Redo    SCN+Time         0          0
+20-JUN-13 Media Recovery   Active Time          Seconds     233822          0
+20-JUN-13 Media Recovery   Standby Apply Lag    Seconds        483          0
+```
+
+**Analiz:**
+- **Active Apply Rate:** Şu anki apply hızı (KB/sn)
+- **Average Apply Rate:** Ortalama apply hızı
+- **Standby Apply Lag:** Saniye cinsinden lag
+
+### 6. Redo Apply Mode Kontrolü
+
+```sql
+-- Standby'da redo apply olup olmadığını kontrol et
+SELECT recovery_mode
+FROM v$archive_dest_status
+WHERE dest_id = 2;
+```
+
+**Çıktı:**
+
+```
+RECOVERY_MODE
+-----------------------
+MANAGED
+```
+
+**MANAGED = Active redo apply çalışıyor**
+
+### 7. MRP Process Wait Event
+
+```sql
+-- MRP process'in ne beklediğini görüntüle
+SELECT a.event,
+       a.wait_time,
+       a.seconds_in_wait
+FROM gv$session_wait a, gv$session b
+WHERE a.sid = b.sid
+  AND b.sid = (SELECT sid
+               FROM v$session
+               WHERE paddr = (SELECT paddr
+                             FROM v$bgprocess
+                             WHERE name = 'MRP0'));
+```
+
+**Çıktı:**
+
+```
+EVENT                                           WAIT_TIME SECONDS_IN_WAIT
+---------------------------------------------- ---------- ---------------
+parallel recovery control message reply                 0               0
+```
+
+### 8. Archive Lag Histogram
+
+```sql
+-- Geçmiş archive lag durumlarını görüntüle (11gR2+)
+COL name FORMAT a10
+SELECT * FROM v$standby_event_histogram;
+```
+
+**Çıktı:**
+
+```
+NAME             TIME UNIT             COUNT LAST_TIME_UPDATED
+---------- ---------- ------------  -------- --------------------
+apply lag           0 seconds              0
+apply lag           1 seconds              1 04/13/2013 01:40:23
+apply lag           2 seconds              1 04/13/2013 01:40:24
+apply lag           3 seconds              1 04/13/2013 01:40:25
+apply lag           4 seconds              1 04/13/2013 01:40:26
+```
+
+### 9. Redo Switch Report (Primary)
+
+```sql
+-- Primary'de redo switch raporu - performans analizi için
+SET pagesize 9999
+COL day FORMAT a15
+SELECT a.*,
+       Round(a.count# * b.avg# / 1024 / 1024) AS daily_avg_mb
+FROM (SELECT To_char(first_time, 'YYYY-MM-DD') AS day,
+             Count(1) AS count#,
+             Min(recid) AS min#,
+             Max(recid) AS max#
+      FROM gv$log_history
+      GROUP BY To_char(first_time, 'YYYY-MM-DD')
+      ORDER BY 1 DESC) a,
+     (SELECT Avg(bytes) AS avg#,
+             Count(1) AS count#,
+             Max(bytes) AS max_bytes,
+             Min(bytes) AS min_bytes
+      FROM gv$log) b;
+```
+
+**Çıktı:**
+
+```
+DAY                 COUNT#       MIN#       MAX# DAILY_AVG_MB
+--------------- ---------- ---------- ---------- ------------
+2013-07-01             442     147345     147566       452608
+2013-06-30             526     147083     147347       538624
+2013-06-29             532     146817     147082       544768
+```
+
+### 10. Primary-Standby Time Difference
+
+```sql
+-- Primary ve standby arasındaki zaman farkını hesapla
+SET serveroutput ON;
+DECLARE
+  v_diff NUMBER := 0;
+  v_hrs  NUMBER := 0;
+  v_min  NUMBER := 0;
+  v_sec  NUMBER := 0;
+  p_dte1 DATE;
+  p_dte2 DATE;
+  date1  long;
+  date2  long;
+BEGIN
+  date1 := 'SELECT sysdate FROM dual';
+  date2 := 'SELECT MAX(next_time) FROM gv$archived_log WHERE applied=''YES''';
+  EXECUTE IMMEDIATE date1 INTO p_dte1;
+  EXECUTE IMMEDIATE date2 INTO p_dte2;
+
+  v_diff := Abs(p_dte2 - p_dte1);
+  v_hrs  := Trunc(v_diff, 0) * 24;
+  v_diff := (v_diff - Trunc(v_diff, 0)) * 24;
+  v_hrs  := v_hrs + Trunc(v_diff, 0);
+  v_diff := (v_diff - Trunc(v_diff, 0)) * 60;
+  v_min  := Trunc(v_diff, 0);
+  v_sec  := Trunc((v_diff - Trunc(v_diff, 0)) * 60, 0);
+
+  dbms_output.put_line(To_char(v_hrs) || ' ' ||
+                       To_char(v_min) || ' ' ||
+                       To_char(v_sec));
+END;
+/
+```
+
+**Çıktı:** `0 10 54` (10 dakika 54 saniye)
+
+## Kullanım Senaryoları
+
+### Senaryo 1: Lag Monitoring
+
+**Amaç:** Apply lag'in 5 dakikayı aşmamasını sağlamak
+
+```sql
+-- Alert query
+SELECT apply_lag
+FROM v$dataguard_stats
+WHERE name = 'apply lag'
+  AND TO_NUMBER(SUBSTR(value, 1, 2)) * 60 +
+      TO_NUMBER(SUBSTR(value, 7, 2)) > 5;
+```
+
+### Senaryo 2: Gap Detection
+
+```sql
+-- Sequence gap kontrolü
+SELECT thread#, sequence#, applied
+FROM v$archived_log
+WHERE sequence# > (SELECT MAX(sequence#) - 10
+                   FROM v$archived_log
+                   WHERE applied = 'YES')
+ORDER BY thread#, sequence#;
+```
+
+### Senaryo 3: Apply Rate Monitoring
+
+```sql
+-- Apply rate trend analizi
+SELECT item,
+      sofar,
+       units,
+       ROUND(sofar / (SELECT MAX(TO_DATE(TIME_COMPUTED, 'MM/DD/YYYY HH24:MI:SS')) -
+                     MIN(TO_DATE(TIME_COMPUTED, 'MM/DD/YYYY HH24:MI:SS'))
+                     FROM v$recovery_progress), 2) AS rate_per_second
+FROM v$recovery_progress
+WHERE item IN ('Active Apply Rate', 'Average Apply Rate');
+```
+
+## Çıktı Analizi
+
+### Normal Değerler
+
+- **Transport Lag:** &lt; 1 dakika
+- **Apply Lag:** &lt; 5 dakika
+- **Apply Rate:** &gt; 10.000 KB/sn
+- **ARC_DIFF:** 1-2 sequence
+
+### Problem Durumları
+
+| Durum | Belirti | Aksiyon |
+|-------|---------|---------|
+| High Lag | Lag &gt; 30 dk | Network, I/O kontrolü |
+| Gap | ARC_DIFF &gt; 10 | Manual archivelog shipping |
+| MRP Stopped | STATUS = IDLE | MRP'yi restart et |
+| Apply Rate Low | &lt; 1000 KB/sn | I/O performance kontrolü |
+
+## Best Practices
+
+### 1. Düzenli Monitoring Schedule
+
+```bash
+# Her 5 dakikada bir kontrol
+*/5 * * * * /oracle/scripts/dataguard_lag_check.sh
+```
+
+### 2. Alert Entegrasyonu
+
+```sql
+-- Email alert procedure
+CREATE OR REPLACE PROCEDURE send_dataguard_alert IS
+BEGIN
+  -- Apply lag > 15 dakika ise email gönder
+  IF EXISTS (SELECT 1 FROM v$dataguard_stats
+             WHERE name = 'apply lag'
+               AND TO_NUMBER(SUBSTR(value, 1, 2)) * 60 > 15) THEN
+    -- Email gönderme kodu
+    NULL;
+  END IF;
+END;
+/
+```
+
+### 3. Alert Log Monitoring
+
+```bash
+# Standby alert log'da media recovery logları görüntüle
+tail -10000 /oracle/diag/rdbms/testdb/TESTDB/trace/alert_TESTDB.log | \
+awk -v x="" '{if (index($0,"Media Recovery Log ")!=0) print $0" "x; \
+else if($1=="Mon"||$1=="Tue"||$1=="Wed"||$1=="Thu"||$1=="Fri"||$1=="Sat"||$1=="Sun") x=$0}'
+```
+
+## İlgili Kaynaklar
+
+- [Oracle Data Guard Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/19/dgbk/)
+- [Data Guard Best Practices](https://www.oracle.com/a/tech/docs/19c-data-guard-best-practices.pdf)
+- [V$DATAGUARD_STATS Reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/V-DATAGUARD_STATS.html)

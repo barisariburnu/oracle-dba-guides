@@ -1,0 +1,373 @@
+---
+title: "Oracle Tablespace Monitoring ve Kapasite Planlaması"
+description: "Oracle tablespace doluluk durumunu izleme, autoextend analizi yapma ve storage kapasitesi planlama rehberi."
+date: 2026-01-16
+category: "Oracle Monitoring"
+tags: ["oracle", "tablespace", "storage", "capacity planning", "monitoring", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Tablespace Monitoring ve Kapasite Planlaması
+
+Oracle veritabanında storage yönetiminin en önemli parçalarından biri, tablespace doluluk durumunu düzenli olarak izlemektir. Bu makalede, kapsamlı bir tablespace monitoring scripti ve storage capacity planning best practices sunacağım.
+
+
+<!--truncate-->
+## Tablespace Monitoring Önemi
+
+Düzenli tablespace monitoring ile şunları sağlayabilirsiniz:
+
+- Storage alanını proaktif yönetin
+- Kapasite sorunlarını önceden tespit edin
+- Autoextend yapılandırmasını optimize edin
+- Storage maliyetlerini kontrol altına alın
+- Kesintisiz servis sunun
+
+<Callout type="warning" title="Kritik Uyarı">
+Tablespace dolarsa veritabanı işlem yapamaz ve kullanıcılar hata alır. Doluluk oranlarını düzenli izleyin ve %80'e ulaşmadan aksiyon alın.
+</Callout>
+
+## Script Özellikleri
+
+Bu monitoring scripti şu bilgileri sağlar:
+
+- Tüm data tablespace'lerin doluluk durumu
+- TEMP tablespace kullanım oranları
+- Autoextend özellikleri ve kapasitesi
+- Autoextend kapalı/açık datafile sayıları
+- Mevcut kullanım oranı ve potansiyel maksimum kullanım
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- SYSDBA yetkisi veya DBA role
+- `DBA_TABLESPACES`, `DBA_DATA_FILES`, `DBA_FREE_SPACE` view'lerine erişim
+
+## Script İçeriği
+
+```sql
+set pagesize 1000 linesize 180
+tti 'Tablespace Doluluk Durumu'
+col "TOPLAM(MB)"  for 99,999,999.999
+col "DOLU(MB)"    for 99,999,999.999
+col "BOS(MB)"     for 99,999,999.999
+col "Artabilir(MB)" for 99,999,999.999
+col "ORAN1 %"     for 999.99
+col "ORAN2 %"     for 999.99
+col "NOTO"        for 9999
+col "OTO"         for 999
+
+SELECT d.tablespace_name "ADI",
+       d.contents "TIPI",
+       NVL(a.bytes /1024/1024,0) "TOPLAM(MB)",
+       NVL(a.bytes - NVL(f.bytes,0),0)/1024/1024 "DOLU(MB)",
+       NVL(f.bytes,0)/1024/1024 "BOS(MB)",
+       NVL((a.bytes - NVL(f.bytes,0))/a.bytes * 100,0)  "ORAN1 %",
+       NVL(a.ARTACAK,0)/1024/1024 "Artabilir(MB)",
+       NVL((a.bytes - NVL(f.bytes,0))/ (a.bytes + NVL(a.ARTACAK,0)) * 100,0)  "ORAN2 %",
+       a.NOTO, a.OTO
+  FROM sys.dba_tablespaces d,
+       (SELECT tablespace_name, sum(bytes) bytes,
+               sum(decode(autoextensible,'YES',MAXbytes - bytes,0 )) ARTACAK,
+               count(decode(autoextensible,'NO',0)) NOTO,
+               count(decode(autoextensible,'YES',0)) OTO
+          FROM dba_data_files
+         GROUP BY tablespace_name) a,
+       (SELECT tablespace_name, sum(bytes) bytes
+          FROM dba_free_space
+         GROUP BY tablespace_name) f
+ WHERE d.tablespace_name = a.tablespace_name(+)
+   AND d.tablespace_name = f.tablespace_name(+)
+   AND NOT (d.extent_management like 'LOCAL' AND d.contents like 'TEMPORARY')
+UNION ALL
+SELECT d.tablespace_name "ADI",
+       d.contents "TIPI",
+       NVL(a.bytes /1024/1024,0) "TOPLAM(MB)",
+       NVL(t.bytes,0)/1024/1024  "DOLU(MB)",
+       NVL(a.bytes - NVL(t.bytes,0),0)/1024/1024 "BOS(MB)",
+       NVL(t.bytes/a.bytes * 100,0) "ORAN1 %",
+       NVL(a.ARTACAK,0)/1024/1024 "Artabilir(MB)",
+       NVL(t.bytes/(a.bytes + NVL(a.ARTACAK,0)) * 100,0)  "ORAN2 %", a.NOTO, a.OTO
+  FROM sys.dba_tablespaces d,
+       (SELECT tablespace_name, sum(bytes) bytes,
+               sum(decode(autoextensible,'YES',MAXbytes - bytes,0 )) ARTACAK,
+               count(decode(autoextensible,'NO',0)) NOTO,
+               count(decode(autoextensible,'YES',0)) OTO
+          FROM dba_temp_files
+         GROUP BY tablespace_name) a,
+       (SELECT tablespace_name, sum(bytes_used) bytes
+          FROM v$temp_extent_pool
+         GROUP BY tablespace_name) t
+ WHERE d.tablespace_name = a.tablespace_name(+)
+   AND d.tablespace_name = t.tablespace_name(+)
+   AND d.extent_management like 'LOCAL'
+   AND d.contents like 'TEMPORARY%'
+ ORDER BY 8 DESC;
+
+exit;
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama |
+|-------|----------|
+| **ADI** | Tablespace adı |
+| **TIPI** | Tablespace tipi (PERMANENT, TEMPORARY, UNDO) |
+| **TOPLAM(MB)** | Toplam tablespace boyutu (MB) |
+| **DOLU(MB)** | Dolu alan (MB) |
+| **BOS(MB)** | Boş alan (MB) |
+| **ORAN1 %** | Mevcut kullanım oranı |
+| **Artabilir(MB)** | Autoextend ile artabilecek alan (MB) |
+| **ORAN2 %** | Autoextend dahil toplam kullanım oranı |
+| **NOTO** | Autoextend kapalı datafile sayısı |
+| **OTO** | Autoextend açık datafile sayısı |
+
+## Örnek Çıktı
+
+```
+ADI          TIPI       TOPLAM(MB)    DOLU(MB)     BOS(MB)      ORAN1 % Artabilir(MB) ORAN2 % NOTO  OTO
+------------ ---------- ------------ ------------ ----------- -------- -------------- ------- ----- ----
+SYSAUX       PERMANENT      1024.00      850.00      174.00     83.01        5120.00   12.12     1    2
+USERS        PERMANENT      2048.00     1600.00      448.00     78.13       10240.00   11.11     0    3
+SYSTEM       PERMANENT       750.00      680.00       70.00     90.67           0.00   90.67     2    0
+TEMP         TEMPORARY      1024.00      512.00      512.00     50.00        5120.00    8.33     0    2
+UNDOTBS1     UNDO            512.00      256.00      256.00     50.00        3072.00    6.25     0    2
+```
+
+<Callout type="info" title="Önemli Not">
+ORAN2 % sütunu autoextend ile büyüyebilecek maksimum kapasiteyi hesaba katar. Bu sütuna göre alarm kuralları oluşturun.
+</Callout>
+
+## Alert Kuralları
+
+### Doluluk Oranı Threshold'ları
+
+| Seviye | ORAN1 % | ORAN2 % | Aksiyon |
+|--------|---------|---------|---------|
+| Kritik | &gt; 85% | &gt; 80% | Acil datafile ekleme |
+| Uyarı | 75-85% | 70-80% | Planlı datafile ekleme |
+| İzleme | 70-75% | 60-70% | Kapasite planlaması yap |
+| Normal | &lt; 70% | &lt; 60% | Normal durum |
+
+### Autoextend Analizi
+
+- **NOTO &gt; 0**: Autoextend kapalı datafile'lar var → Riskli durum
+- **OTO = 0**: Hiç autoextend yok → Manuel yönetim gerekiyor
+- **Artabilir(MB) = 0**: Büyüme potansiyeli yok → Disk dolabilir
+
+## Gelişmiş Monitoring Sorguları
+
+### Kritik Tablespace'leri Filtreleme
+
+```sql
+set linesize 200
+set pagesize 200
+
+SELECT tablespace_name,
+       ROUND(used_mb, 2) used_mb,
+       ROUND(total_mb - used_mb, 2) free_mb,
+       ROUND(used_percent, 2) used_percent,
+       CASE
+         WHEN used_percent > 85 THEN 'CRITICAL'
+         WHEN used_percent > 75 THEN 'WARNING'
+         ELSE 'OK'
+       END AS status
+FROM (
+  SELECT a.tablespace_name,
+         (a.bytes - NVL(f.bytes,0))/1024/1024 used_mb,
+         a.bytes/1024/1024 total_mb,
+         ROUND((a.bytes - NVL(f.bytes,0))/a.bytes * 100, 2) used_percent
+    FROM (SELECT tablespace_name, SUM(bytes) bytes
+            FROM dba_data_files
+           GROUP BY tablespace_name) a,
+         (SELECT tablespace_name, SUM(bytes) bytes
+            FROM dba_free_space
+           GROUP BY tablespace_name) f
+   WHERE a.tablespace_name = f.tablespace_name(+)
+)
+WHERE used_percent > 70
+ORDER BY used_percent DESC;
+```
+
+### Büyüme Trend Analizi (Son 30 Gün)
+
+```sql
+-- Bu sorgu AWR verilerini kullanır
+SELECT snap_id,
+       end_interval_time,
+       tablespace_name,
+       ROUND(space_used/1024/1024, 2) space_used_mb,
+       ROUND(space_total/1024/1024, 2) space_total_mb,
+       ROUND(space_used/space_total*100, 2) used_percent
+FROM dba_hist_tbspc_space_usage
+WHERE end_interval_time > SYSDATE - 30
+  AND tablespace_name = 'USERS'
+ORDER BY snap_id DESC;
+```
+
+### Autoextend Kapalı Datafile'lar
+
+```sql
+set linesize 200
+set pagesize 200
+
+SELECT file_name,
+       tablespace_name,
+       ROUND(bytes/1024/1024, 2) size_mb,
+       autoextensible,
+       ROUND(maxbytes/1024/1024, 2) max_size_mb,
+       increment_by
+FROM dba_data_files
+WHERE autoextensible = 'NO'
+ORDER BY tablespace_name, file_name;
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Tablespace Kontrolü
+
+```bash
+#!/bin/bash
+# tablespace_check.sh
+
+sqlplus -s / as sysdba @tablespace.sql > /tmp/tbs_report.txt
+
+# Kritik doluluk kontrolü
+if grep -q "CRITICAL" /tmp/tbs_report.txt; then
+    echo "ALARM: Tablespace doluluk uyarısı!" | mail -s "Tablespace Alarm" dba@company.com
+    cat /tmp/tbs_report.txt | mail -a "Tablespace Report" dba@company.com
+fi
+```
+
+### 2. Autoextend Kapalı Datafile'ları Açma
+
+```sql
+-- Autoextend kapalı datafile'ları aç
+ALTER DATABASE DATAFILE '/u01/app/oracle/oradata/prod/users01.dbf'
+  AUTOEXTEND ON NEXT 100M MAXSIZE 32G;
+```
+
+### 3. Tablespace Büyütme
+
+```sql
+-- Mevcut datafile'a alan ekle
+ALTER DATABASE DATAFILE '/u01/app/oracle/oradata/prod/users01.dbf'
+  RESIZE 2048M;
+
+-- Veya yeni datafile ekle
+ALTER TABLESPACE users ADD DATAFILE '/u01/app/oracle/oradata/prod/users02.dbf'
+  SIZE 1024M AUTOEXTEND ON NEXT 100M MAXSIZE 32G;
+```
+
+## Capacity Planning
+
+### Büyüme Tahmini
+
+Son 3 ayın büyüme trendine göre 6 ay sonraki durum:
+
+```sql
+WITH current_size AS (
+  SELECT tablespace_name,
+         SUM(bytes)/1024/1024 current_mb
+    FROM dba_data_files
+   GROUP BY tablespace_name
+),
+growth_rate AS (
+  SELECT tablespace_name,
+         (SUM(space_total) - LAG(SUM(space_total)) OVER (PARTITION BY tablespace_name ORDER BY snap_id))/1024/1024 growth_mb
+    FROM dba_hist_tbspc_space_usage
+   WHERE end_interval_time > SYSDATE - 90
+   GROUP BY tablespace_name, snap_id, space_total
+)
+SELECT c.tablespace_name,
+       ROUND(c.current_mb, 2) current_mb,
+       ROUND(AVG(g.growth_mb), 2) avg_monthly_growth,
+       ROUND(c.current_mb + (AVG(g.growth_mb) * 6), 2) projected_6month_mb
+FROM current_size c
+LEFT JOIN growth_rate g ON c.tablespace_name = g.tablespace_name
+GROUP BY c.tablespace_name, c.current_mb
+ORDER BY c.tablespace_name;
+```
+
+## Troubleshooting
+
+### Sorun: Tablespace Dolu (ORA-01653)
+
+**Çözüm Adımları:**
+
+```sql
+-- 1. Doluluk oranını kontrol edin
+SELECT tablespace_name, ROUND(used_percent, 2)
+FROM (SELECT a.tablespace_name, ROUND((a.bytes - NVL(f.bytes,0))/a.bytes * 100, 2) used_percent
+        FROM (SELECT tablespace_name, SUM(bytes) bytes FROM dba_data_files GROUP BY tablespace_name) a,
+             (SELECT tablespace_name, SUM(bytes) bytes FROM dba_free_space GROUP BY tablespace_name) f
+       WHERE a.tablespace_name = f.tablespace_name(+))
+WHERE used_percent > 85;
+
+-- 2. Tablespace büyütün
+ALTER TABLESPACE users ADD DATAFILE '/path/to/file.dbf' SIZE 1G AUTOEXTEND ON;
+
+-- 3. Veya segmentleri temizleyin (gerekiyorsa)
+-- Segment shrink veya drop/purge işlemleri
+```
+
+### Sorun: Autoextend Çalışmıyor
+
+**Çözüm:**
+
+```sql
+-- Disk alanını kontrol edin
+SELECT * FROM v$datafile WHERE autoextensible = 'YES' AND maxbytes > bytes;
+
+-- Disk quota'yı kontrol edin (ASM kullanıyorsanız)
+SELECT name, free_mb, total_mb FROM v$asm_diskgroup;
+
+-- Autoextend'i manuel olarak kontrol edin
+ALTER DATABASE DATAFILE '/path/to/file.dbf' AUTOEXTEND ON NEXT 100M MAXSIZE UNLIMITED;
+```
+
+## Best Practices
+
+### 1. Monitoring Frekansı
+
+- **Günlük**: Tablespace doluluk kontrolü
+- **Haftalık**: Büyüme trend analizi
+- **Aylık**: Kapasite planlama
+
+### 2. Autoextend Politikası
+
+- Production ortamlarında autoextend kullanın
+- Maxsize makul bir değer belirleyin (disk boyutunu aşmasın)
+- Increment by değeri makul olsun (100MB - 1GB arası)
+
+### 3. Storage Tiering
+
+- Sık erişilen veriler için hızlı disk (SSD)
+- Arşiv veriler için yavaş disk (HDD)
+- Tablespace'leri kullanım pattern'ına göre yerleştirin
+
+## İlgili Görünümler
+
+- `DBA_TABLESPACES` - Tablespace bilgileri
+- `DBA_DATA_FILES` - Datafile bilgileri
+- `DBA_FREE_SPACE` - Boş alan bilgileri
+- `DBA_TEMP_FILES` - Temporary datafile bilgileri
+- `DBA_HIST_TBSPC_SPACE_USAGE` - AWR historisi
+
+## Kaynaklar
+
+- Oracle Database Administrator's Guide
+- Oracle Database SQL Language Reference
+- Oracle Storage Management Best Practices
+
+## Sonraki Adımlar
+
+Bu tablespace monitoring scripti ile şunları yapabilirsiniz:
+
+- Otomatik tablespace büyütme scriptleri
+- Predictive capacity planning
+- Storage tiering optimizasyonu
+- Otomatik alarm sistemi entegrasyonu
+- Kapasite dashboard'ları
+
+Tablespace monitoring, storage yönetiminin en kritik parçasıdır. Bu scriptleri düzenli kullanarak storage sorunlarını proaktif yönetebilirsiniz.

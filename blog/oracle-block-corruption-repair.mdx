@@ -1,0 +1,83 @@
+---
+title: "Oracle RMAN ile Block Corruption Tespiti ve Onarımı"
+description: "Veritabanındaki fiziksel ve mantıksal blok bozulmalarını (block corruption) tespit etme, etkilenen objeleri bulma ve RMAN Blockrecover ile online onarma rehberi."
+date: 2026-01-16
+category: "Oracle Performans"
+tags: ["oracle", "rman", "block corruption", "blockrecover", "v$database_block_corruption", "dba", "troubleshooting"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN ile Block Corruption Tespiti ve Onarımı
+
+Oracle veritabanında "Block Corruption" (Blok Bozulması), verinin diskte fiziksel veya mantıksal olarak hasar görmesi durumudur. Bu durum genelde I/O hataları, storage problemleri veya firmware hatalarından kaynaklanır. Eskiden tüm dosyayı restore etmek gerekirken, artık RMAN ile sadece bozulan tek bir bloğu veritabanı açıkken (online) onarabilirsiniz.
+
+
+<!--truncate-->
+## 1. Bozuk Blokların Tespiti
+
+Bozuk bloklar genelde bir sorgu sırasında `ORA-01578` hatası ile ortaya çıkar. Ancak proaktif olarak şu yöntemlerle tespit edilebilir:
+
+### SQL Sorgusu: Bozulma Listesi
+
+```sql
+SELECT * FROM v$database_block_corruption;
+```
+
+Bu view, en son yapılan check işlemlerinde tespit edilen bozuk blokların dosya ID'sini ve blok numarasını verir.
+
+### RMAN ile Manuel Doğrulama (Validate)
+
+Tüm veritabanını veya belirli bir dosyayı mantıksal hatalara karşı tarayabilirsiniz:
+
+```rman
+VALIDATE CHECK LOGICAL DATABASE;
+-- Veya sadece belirli bir dosya
+BACKUP VALIDATE CHECK LOGICAL DATAFILE 13;
+```
+
+## 2. Etkilenen Objenin Bulunması
+
+Bozulan bloğun hangi tabloya veya index'e ait olduğunu bilmek, sorunun etkisini anlamak için kritik önemdedir.
+
+```sql
+SELECT tablespace_name, segment_type, owner, segment_name 
+FROM dba_extents 
+WHERE file_id = &file_id 
+  AND &block_id BETWEEN block_id AND block_id + blocks - 1;
+```
+
+## 3. RMAN Blockrecover ile Online Onarım
+
+Eğer elinizde geçerli bir backup ve arşiv loglar varsa, kullanıcılar çalışmaya devam ederken bloğu saniyeler içinde onarabilirsiniz.
+
+### Tek Bir Bloğu Onarma
+
+```rman
+BLOCKRECOVER DATAFILE 18 BLOCK 1070338;
+```
+
+### Tüm Corruption Listesini Onarma
+
+Eğer `v$database_block_corruption` içinde çok sayıda blok varsa, hepsini tek komutla onarabilirsiniz:
+
+```rman
+RECOVER CORRUPTION LIST;
+```
+
+## 4. DBVERIFY (DBV) Aracının Kullanımı
+
+RMAN dışında, işletim sistemi seviyesinde `dbv` aracını kullanarak dosyaları kontrol edebilirsiniz. Özellikle ASM kullanan ortamlarda çok hızlı sonuç verir:
+
+```bash
+dbv file=+DATA/PROD/datafile/users01.dbf feedback=10000
+```
+
+Eğer çıktı `Total Pages Corrupt : 0` ise dosya fiziksel olarak sağlıklıdır.
+
+<Callout type="warning" title="Kritik Hatırlatma">
+`BLOCKRECOVER` işleminin başarılı olması için, bloğun bozulmadan önceki bir tarihe ait yedeğinin ve o tarihten günümüze kadar olan tüm ARCHIVELOG'ların eksiksiz olması gerekir.
+</Callout>
+
+## Sonuç
+
+Blok bozulması her DBA'nın korkulu rüyası olsa da, RMAN'in sunduğu "Block Media Recovery" özelliği sayesinde artık saatlerce süren restore işlemlerine gerek kalmamıştır. Proaktif olarak haftalık `VALIDATE` raporları almak, bozulmaları henüz kimse fark etmeden onarmanızı sağlar.

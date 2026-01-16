@@ -1,0 +1,95 @@
+---
+title: "Oracle Listener Log Analizi: Kim Bağlanıyor? Hatalar ve Güvenlik"
+description: "Oracle Listener log dosyalarını analiz ederek hangi hostlardan bağlantı geldiğini, bağlantı hatalarını ve yük dağılımını izleme yöntemleri."
+date: "2026-01-16"
+category: "Tanılama"
+tags: ["Oracle", "Listener", "Log Analysis", "External Tables", "Security", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Listener Log Analizi: İçeriden Bir Bakış
+
+Oracle **Listener**, dış dünyadan gelen veritabanı bağlantılarını karşılayan kapıdır. Bu kapıdan kimlerin girdiğini, hangi istemcilerin hata aldığını veya saniyede kaç bağlantı isteği geldiğini bilmek hem güvenlik hem de performans açısından kritiktir. Çoğu DBA, `listener.log` dosyasına sadece bir sorun olduğunda (`TNS-XXXX`) bakar. Ancak bu dosya, bir hazinedir.
+
+
+<!--truncate-->
+Bu makalede, Listener loglarını SQL kullanarak nasıl analiz edebileceğinizi inceleyeceğiz.
+
+## 1. Listener Logunu Dış Tablo (External Table) Olarak Okuma
+
+Büyük bir log dosyasını manuel olarak `grep` veya `awk` ile taramak zordur. En profesyonel yöntem, bu dosyayı bir **External Table** olarak veritabanına bağlamaktır.
+
+```sql
+-- Önce bir dizin oluşturulur
+CREATE OR REPLACE DIRECTORY LISTENER_LOG_DIR AS '/u01/app/oracle/diag/tnslsnr/host/listener/trace';
+
+-- External tablo oluşturulur
+CREATE TABLE LISTENER_LOG_EXT (
+  line VARCHAR2(4000)
+)
+ORGANIZATION EXTERNAL (
+  TYPE ORACLE_LOADER
+  DEFAULT DIRECTORY LISTENER_LOG_DIR
+  ACCESS PARAMETERS (
+    RECORDS DELIMITED BY NEWLINE
+    NOBADFILE NODISCARDFILE NOLOGFILE
+  )
+  LOCATION ('listener.log')
+) REJECT LIMIT UNLIMITED;
+```
+
+---
+
+## 2. Bağlantı İstatistiklerini Sorgulama
+
+Dosyayı tabloya bağladıktan sonra, hangi IP adresinden kaç tane başarılı bağlantı isteği geldiğini görebiliriz:
+
+```sql
+SELECT 
+  SUBSTR(line, INSTR(line, 'HOST=') + 5, INSTR(line, ')', INSTR(line, 'HOST=')) - (INSTR(line, 'HOST=') + 5)) as client_host,
+  COUNT(*) as connection_count
+FROM LISTENER_LOG_EXT
+WHERE line LIKE '%establish%'
+GROUP BY 
+  SUBSTR(line, INSTR(line, 'HOST=') + 5, INSTR(line, ')', INSTR(line, 'HOST=')) - (INSTR(line, 'HOST=') + 5))
+ORDER BY 2 DESC;
+```
+
+---
+
+## 3. Hata Analizi (TNS Hataları)
+
+Bağlantı kuramayan ve hata alan tüm oturumları saniyeler içinde raporlayın:
+
+```sql
+SELECT line 
+FROM LISTENER_LOG_EXT 
+WHERE line LIKE '%* [1-9]%' -- Sıfır dışındaki (hata alan) dönüş kodları
+ORDER BY 1 DESC;
+```
+
+---
+
+## 4. Log Dosyası Yönetimi (Housekeeping)
+
+Listener log dosyası, yoğun sistemlerde GB'larca boyuta ulaşabilir. Dosya çok büyüdüğünde Listener'ın yazma performansı düşebilir.
+
+**Güvenli Temizlik Adımları:**
+```bash
+# 1. Listener'a log yazmayı durdur deyin
+lsnrctl set log_status off
+
+# 2. Dosyayı yedekleyin veya silin
+mv listener.log listener.log.old
+
+# 3. Yazmayı tekrar başlatın (Oracle yeni dosyayı otomatik oluşturur)
+lsnrctl set log_status on
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **ADR (Automatic Diagnostic Repository):** 11g ve sonrası sürümlerde loglar XML formatında da (`log.xml`) tutulur. `adrci` aracını kullanarak bunları analiz etmek çok daha kolaydır.
+-   **Bağlantı Fırtınası (Connection Storm):** Eğer loglarda saniyede yüzlerce yeni bağlantı görüyorsanız, uygulamanızın **Connection Pooling** (Bağlantı Havuzu) kullanmadığını anlayabilirsiniz.
+-   **Güvenlik:** Yetkisiz bir IP adresinden gelen sürekli bağlantı denemelerini bu loglar üzerinden yakalayabilirsiniz.
+
+Listener logları, veritabanının "kapı kayıtları"dır. Onlara hakim olmak, ağ seviyesindeki sorunları henüz veritabanına ulaşmadan çözmenizi sağlar.

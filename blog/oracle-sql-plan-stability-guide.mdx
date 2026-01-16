@@ -1,0 +1,98 @@
+---
+title: "Oracle SQL Plan Kararlılığı: SQL Profiles ve SQL Plan Baselines (SPM)"
+description: "Oracle veritabanında SQL çalışma planlarının (execution plans) değişerek performans kaybına yol açmasını engellemek için SQL Profiles ve SQL Plan Baselines (SPM) kullanımı."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle", "SQL Performance", "SQL Profile", "SQL Plan Baseline", "SPM", "Query Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Plan Kararlılığı: SQL Profiles ve SQL Plan Baselines
+
+Oracle veritabanlarında en sık karşılaşılan performans sorunlarından biri, bir SQL sorgusunun dün çok hızlı çalışırken bugün aniden yavaşlamasıdır. Bunun temel sebebi genellikle **Plan Regression**, yani Optimizer'ın istatistik değişimleri veya parametre güncellemeleri sonucu daha kötü bir çalışma planı seçmesidir.
+
+
+<!--truncate-->
+Bu makalede, plan kararlılığını (Plan Stability) sağlamak için kullanılan iki güçlü mekanizmayı inceleyeceğiz: **SQL Profiles** ve **SQL Plan Baselines (SPM)**.
+
+## 1. SQL Profiles: Optimizer'a Yol Göstermek
+
+SQL Profiles, bir sorgunun istatistiksel hatalarını (cardinality mismatch vb.) düzelterek Optimizer'ın doğru karar vermesini sağlar. Genellikle **SQL Tuning Advisor** tarafından otomatik üretilir, ancak manuel olarak da oluşturulabilir.
+
+### Manuel SQL Profile Oluşturma
+Bazen bir sorgunun içindeki `HINT`'leri kodun kendisine dokunmadan dışarıdan eklemek isteyebilirsiniz. İşte `DBMS_SQLTUNE.IMPORT_SQL_PROFILE` ile bunu yapmanın yolu:
+
+```sql
+DECLARE
+  ar_profile_hints sys.sqlprof_attr;
+BEGIN
+  ar_profile_hints := sys.sqlprof_attr(
+    'INDEX(@SEL$1 "MY_TABLE" "MY_INDEX")',
+    'FULL(@SEL$1 "OTHER_TABLE")'
+  );
+
+  dbms_sqltune.import_sql_profile(
+    sql_text => 'SELECT * FROM my_table WHERE ...',
+    profile  => ar_profile_hints,
+    name     => 'PROF_MY_SQL_ID',
+    force_match => TRUE -- Parametrik sorgular için
+  );
+END;
+/
+```
+
+---
+
+## 2. SQL Plan Baselines (SPM): Planı Dondurmak
+
+Oracle 11g ile gelen **SQL Plan Management (SPM)**, bir sorgunun sadece onaylanmış (accepted) planlarla çalışmasını garanti eder. Yeni bir plan oluşsa bile, mevcut plandan daha iyi olduğu kanıtlanana kadar Baseline dışındaki planlar kullanılmaz.
+
+### Çalışan Bir Planı Cursor Cache'den Baseline Olarak Yükleme
+Hali hazırda sistemde iyi çalışan bir planı dondurmak için:
+
+```sql
+DECLARE
+  l_plans_loaded PLS_INTEGER;
+BEGIN
+  l_plans_loaded := DBMS_SPM.LOAD_PLANS_FROM_CURSOR_CACHE(
+    sql_id => '5buudsxktf2uc',
+    plan_hash_value => 12345678,
+    fixed => 'YES' -- Bu planın kesinlikle kullanılmasını sağlar
+  );
+END;
+/
+```
+
+### Baseline Temizleme (Eski/Kötü Planları Silme)
+Eğer sistemde yanlış bir Baseline oluşmuşsa bunu silebilirsiniz:
+
+```sql
+DECLARE
+  l_plans_dropped PLS_INTEGER;
+BEGIN
+  l_plans_dropped := DBMS_SPM.DROP_SQL_PLAN_BASELINE(
+    sql_handle => 'SQL_1d7but6d077453',
+    plan_name  => 'SQL_PLAN_bvtv4uh1d7but...'
+  );
+END;
+/
+```
+
+---
+
+## 3. SQL Profile vs SQL Plan Baseline: Hangisi Seçilmeli?
+
+| Özellik | SQL Profile | SQL Plan Baseline (SPM) |
+| :--- | :--- | :--- |
+| **Mantık** | İstatistik hatalarını giderir. | Belirli bir planın kullanılmasını zorunlu kılar. |
+| **Esneklik** | Planın zamanla evrilmesine izin verir. | Daha katıdır, sadece onaylı planlara izin verir. |
+| **Düzeltme Yöntemi** | Hint kullanarak yönlendirme yapar. | Planın tamamını (plan hash) saklar. |
+| **Öncelik** | SPM varsa, Profile ikinci plandadır. | SPM her zaman önceliklidir. |
+
+## Özet ve En İyi Uygulamalar
+
+-   **SQL_ID Değişmiyorsa:** Basit plan sabitleme için SPM (Baseline) tercih edin.
+-   **Parametrik Sorgular (Literal):** Eğer sorgu sürekli değişiyorsa (literal değerler), `FORCE_MATCH => TRUE` ile SQL Profile kullanmak daha etkilidir.
+-   **AWR Desteği:** Eğer iyi çalışan plan artık hafızada değilse, `DBMS_SPM.LOAD_PLANS_FROM_AWR` prosedürü ile geçmişteki başarılı planları geri getirebilirsiniz.
+
+SQL Plan yönetimi, performans krizlerinde DBA'in en büyük cankurtaranıdır. Sisteminizdeki kritik sorguları Baseline altına alarak "sabah sürprizi" yaşama riskini minimize edebilirsiniz.

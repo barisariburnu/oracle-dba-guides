@@ -1,0 +1,417 @@
+---
+title: "Oracle ASM Disk Oluşturma ve Konfigürasyonu - Linux Complete Guide"
+description: "Oracle ASM disk oluşturma adımları, ASMLib kurulumu, diskgroup oluşturma, oracleasm configure ve complete Linux ASM konfigürasyon rehberi."
+date: 2025-01-16
+category: "Oracle ASM"
+tags: ["oracle", "asm", "linux", "storage", "disk management", "asmlib", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle ASM Disk Oluşturma ve Konfigürasyonu
+
+Oracle Automatic Storage Management (ASM), database administrator'ların storage yönetimini simplify eden bir çözümdür. Bu yazıda **Linux'ta ASM disk oluşturma**, **ASMLib kurulumu** ve **diskgroup konfigürasyonu** adımlarını detaylı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+ASM, Oracle database'leri için optimize edilmiş bir volume manager ve file system'dir. ASM kullanmak, storage yönetimini %70 oranında azaltır.
+</Callout>
+
+## Script'in Amacı
+
+Bu script ile şu işlemler gerçekleştirilir:
+
+- **ASMLib paketlerinin** kurulumu
+- **Oracle ASM driver** konfigürasyonu
+- **ASM disklerinin** oluşturulması
+- **Diskgroup** hazırlığı
+- **Oracle preinstall** paketinin kurulumu
+
+## Önkoşullar
+
+1. **Oracle Linux** veya **RHEL** işletim sistemi
+2. **Root erişimi**
+3. **Yeterli disk alanı** (raw diskler)
+4. **Oracle user ve group** oluşturulmuş olmalı
+
+## ASMLib Kurulumu
+
+### Adım 1: ASMLib Paketlerini Yükle
+
+```bash
+# Kernel-uek kontrolü ve kurulumu
+yum install kernel-uek
+
+# ASMLib support paketi
+yum install oracleasm-support
+
+# ASMLib library (Oracle Linux reposunda)
+yum install oracleasmlib
+```
+
+**Çıktı Örneği:**
+
+```
+Loaded plugins: refresh-packagekit, security
+Setting up Install Process
+Resolving Dependencies
+--> Running transaction check
+---> Package oracleasm-support.x86_64 0:2.1.8-1.el6 will be installed
+--> Finished Dependency Resolution
+
+Dependencies Resolved
+================================================================================
+ Package                Arch       Version           Repository         Size
+================================================================================
+Installing:
+ oracleasm-support      x86_64     2.1.8-1.el6      ol6_latest         73 k
+
+Transaction Summary
+================================================================================
+Install       1 Package(s)
+Total download size: 73 k
+Installed size: 216 k
+Is this ok [y/N]: y
+```
+
+### Adım 2: Oracle ASM Driver Konfigürasyonu
+
+```bash
+# Mevcut konfigürasyonu görüntüle
+oracleasm configure
+
+# Çıktı:
+ORACLEASM_ENABLED=false
+ORACLEASM_UID=
+ORACLEASM_GID=
+ORACLEASM_SCANBOOT=true
+ORACLEASM_SCANORDER=""
+ORACLEASM_SCANEXCLUDE=""
+ORACLEASM_USE_LOGICAL_BLOCK_SIZE="false"
+```
+
+### Adım 3: ASM Driver'ı Konfigüre Et
+
+```bash
+# Interaktif konfigürasyon
+/etc/init.d/oracleasm configure
+
+# Çıktı:
+Configuring the Oracle ASM library driver.
+
+This will configure the on-boot properties of the Oracle ASM library
+driver. The following questions will determine whether the driver is
+loaded on boot and what permissions it will have. The current values
+will be shown in brackets ('[]'). Hitting <ENTER> without typing an
+answer will keep that current value. Ctrl-C will abort.
+
+Default user to own the driver interface []: oracle
+Default group to own the driver interface []: dba
+Start Oracle ASM library driver on boot (y/n) [n]: y
+Scan for Oracle ASM disks on boot (y/n) [y]: y
+Writing Oracle ASM library driver configuration: done
+Initializing the Oracle ASMLib driver: [  OK  ]
+Scanning the system for Oracle ASMLib disks: [  OK  ]
+```
+
+<Callout type="warning" title="Uyarı">
+Oracle user ve dba group önceden oluşturulmalıdır. Aksi takdirde hata alırsınız.
+</Callout>
+
+## ASM Disk Oluşturma
+
+### Adım 4: Disk Bölümlerini Hazırla
+
+```bash
+# Diskleri listele
+fdisk -l
+
+# Çıktı örneği:
+Disk /dev/sdb: 5368 MB, 5368709120 bytes
+Disk /dev/sdc: 21.5 GB, 21474836480 bytes
+
+# Partition oluşturma (sdb için)
+fdisk /dev/sdb
+
+# fdisk komutları:
+n (new partition)
+p (primary)
+1 (partition number)
+(default) (first cylinder)
+(default) (last cylinder)
+w (write and exit)
+```
+
+### Adım 5: ASM Diskleri Oluştur
+
+```bash
+# OCR disk'i oluştur
+oracleasm createdisk OCR /dev/sdb1
+
+# Çıktı:
+Writing disk header: done
+Instantiating disk: done
+
+# DATA disk'i oluştur
+oracleasm createdisk DATA /dev/sdc1
+
+# Çıktı:
+Writing disk header: done
+Instantiating disk: done
+```
+
+### Adım 6: ASM Disklerini Listele
+
+```bash
+# ASM disklerini görüntüle
+oracleasm listdisks
+
+# Çıktı:
+DATA
+OCR
+
+# Disk detaylarını görüntüle
+ls -la /dev/oracleasm/disks/
+
+# Çıktı:
+total 0
+drwxr-xr-x 1 root   root     0 Oct 17 17:12 .
+drwxr-xr-x 4 root   root     0 Oct 17 17:12 ..
+brw-rw---- 1 oracle dba  8, 33 Oct 17 17:14 DATA
+brw-rw---- 1 oracle dba  8, 17 Oct 17 17:13 OCR
+```
+
+## Oracle Preinstall Paketi
+
+### Adım 7: Preinstall Paketi Kur
+
+```bash
+# Oracle 11gR2 preinstall paketi
+yum install oracle-rdbms-server-11gR2-preinstall
+
+# Çıktı:
+Dependencies Resolved:
+
+================================================================================
+ Package                                   Arch    Version
+================================================================================
+Installing:
+ oracle-rdbms-server-11gR2-preinstall      x86_64  1.0-9.el6
+Installing for dependencies:
+ ksh                                       x86_64  20120801-10.el6_5.12
+ libaio-devel                              x86_64  0.3.107-10.el6
+
+Transaction Summary
+================================================================================
+Install       3 Package(s)
+Total download size: 787 k
+```
+
+<Callout type="info" title="Bilgi">
+Oracle preinstall paketi:
+- Gerekli kernel parametrelerini ayarlar
+- Oracle user ve group'ları oluşturur
+- Gerekli paketleri kurar
+- Limits konfigürasyonunu yapar
+</Callout>
+
+## ASM Diskgroup Oluşturma
+
+### Adım 8: ASM Instance ile Diskgroup Oluştur
+
+```sql
+-- ASM instance'a bağlan
+export ORACLE_SID=+ASM
+sqlplus / as sysasm
+
+-- DATA diskgroup'u oluştur
+CREATE DISKGROUP DATA NORMAL REDUNDANCY
+  DISK '/dev/oracleasm/disks/DATA'
+  ATTRIBUTE 'compatible.asm' = '192.168.1.101.0';
+
+-- FRA diskgroup'u oluştur
+CREATE DISKGROUP FRA NORMAL REDUNDANCY
+  DISK '/dev/oracleasm/disks/FRA'
+  ATTRIBUTE 'compatible.asm' = '192.168.1.101.0';
+
+-- Diskgroup'ları listele
+SELECT name, type, total_mb, free_mb, required_mirror_free_mb
+FROM v$asm_diskgroup;
+```
+
+**Çıktı:**
+
+```
+NAME TYPE      TOTAL_MB    FREE_MB   REQUIRED_MIRROR_FREE_MB
+---- ---------- ---------- ---------- -------------------------
+DATA NORMAL      102400      51200                    0
+FRA  NORMAL       51200      25600                    0
+```
+
+## Kullanım Senaryoları
+
+### Senaryo 1: Yeni Disk Ekleme
+
+```bash
+# Yeni partition oluştur
+fdisk /dev/sdd
+
+# ASM disk'i oluştur
+oracleasm createdisk DATA3 /dev/sdd1
+
+# ASM instance'da diskgroup'a ekle
+sqlplus / as sysasm
+
+ALTER DISKGROUP DATA ADD DISK '/dev/oracleasm/disks/DATA3';
+```
+
+### Senaryo 2: Disk Drop Etme
+
+```sql
+-- Disk'i diskgroup'tan drop et
+ALTER DISKGROUP DATA DROP DISK 'DATA_0001';
+
+-- Drop işlemini izle
+SELECT name, state, path
+FROM v$asm_disk
+WHERE group_number = (SELECT group_number FROM v$asm_diskgroup WHERE name = 'DATA');
+```
+
+### Senaryo 3: Diskgroup Rebalance
+
+```sql
+-- Rebalance operation'ı izle
+SELECT group_number,
+       operation,
+       state,
+       power,
+       est_work,
+       sofar,
+       ROUND(sofar/est_work*100, 2) pct_complete
+FROM v$asm_operation;
+```
+
+## Troubleshooting
+
+### Sorun 1: ASM Disk Görünmüyor
+
+```bash
+# Diskleri yeniden scan et
+oracleasm scandisks
+
+# Disk durumunu kontrol et
+oracleasm querydisk /dev/sdb1
+```
+
+### Sorun 2: Permission Hataları
+
+```bash
+# Disk permissions'ı kontrol et
+ls -l /dev/oracleasm/disks/
+
+# Owner oracle:dba olmalı
+# Eğer değilse:
+chown oracle:dba /dev/oracleasm/disks/*
+chmod 660 /dev/oracleasm/disks/*
+```
+
+### Sorun 3: ASM Instance Başlamıyor
+
+```bash
+# Alert log'u kontrol et
+tail -100 +ASM.log
+
+# ASM parametre dosyasını kontrol et
+cat $ORACLE_HOME/dbs/init+ASM.ora
+
+# Spfile'i kontrol et
+sqlplus / as sysasm
+SHOW PARAMETER spfile
+```
+
+## Best Practices
+
+### 1. Diskgroup Redundancy
+
+```sql
+-- Normal redundancy için 2 failure group
+CREATE DISKGROUP DATA NORMAL REDUNDANCY
+  DISK 'DISK1', 'DISK2', 'DISK3', 'DISK4';
+
+-- High redundancy için 3 failure group
+CREATE DISKGROUP DATA HIGH REDUNDANCY
+  DISK 'DISK1', 'DISK2', 'DISK3', 'DISK4', 'DISK5', 'DISK6';
+```
+
+### 2. AU Size Seçimi
+
+```sql
+-- Large database'ler için 4MB AU
+CREATE DISKGROUP DATA NORMAL REDUNDANCY
+  DISK '/dev/oracleasm/disks/DATA*'
+  ATTRIBUTE 'au_size' = '4M';
+
+-- Small database'ler için default 1MB
+CREATE DISKGROUP DATA NORMAL REDUNDANCY
+  DISK '/dev/oracleasm/disks/DATA*';
+```
+
+### 3. ASM Template Kullanımı
+
+```sql
+-- Datafile template
+ALTER DISKGROUP DATA ADD DIRECTORY 'datafile';
+
+-- Template oluştur
+ALTER DISKGROUP DATA ADD TEMPLATE 'datafile_tbs'
+  ATTRIBUTES (UNPROTECTED COARSE);
+
+-- Template'i kullan
+CREATE TABLESPACE users DATAFILE '+DATA(datafile_tbs)' SIZE 100M;
+```
+
+### 4. Power Limit Ayarı
+
+```sql
+-- Rebalance hızını artır
+ALTER DISKGROUP DATA REBALANCE POWER 11;
+
+-- Anlık kontrol
+SELECT name, power
+FROM v$asm_diskgroup;
+```
+
+## Monitoring Query'leri
+
+### ASM Disk Usage
+
+```sql
+SELECT dg.name AS diskgroup,
+       d.name AS disk_name,
+       d.path,
+       d.total_mb,
+       d.free_mb,
+       ROUND(d.free_mb/d.total_mb*100, 2) AS pct_free
+FROM v$asm_diskgroup dg, v$asm_disk d
+WHERE dg.group_number = d.group_number
+ORDER BY dg.name, d.name;
+```
+
+### ASM Operation Status
+
+```sql
+SELECT group_number,
+       operation,
+       state,
+       est_minutes,
+       ROUND(sofar/est_work*100, 2) AS progress_pct
+FROM v$asm_operation;
+```
+
+## İlgili Kaynaklar
+
+- [Oracle ASM Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/19/ostmg/)
+- [ASMLib Installation Guide](https://docs.oracle.com/cd/E11882_01/server.112/e18951/asminst.htm)
+- [ASM Best Practices](https://www.oracle.com/technetwork/database/clustering/asm-best-practices-1968323.pdf)
+
+Bu yazıda ASM disk oluşturma işlemlerini öğrendiniz. Diğer ASM yönetim konuları için blog yazılarımıza göz atın.

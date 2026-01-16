@@ -1,0 +1,96 @@
+---
+title: "Oracle Tablespace Yönetimi ve Datafile İşlemleri"
+description: "Tablespace oluşturma, datafile ekleme, tablespace taşıma, resizing ve doluluk oranlarını izleme için temel SQL scriptleri ve yönetim rehberi."
+date: 2026-01-16
+category: "Oracle Yönetim"
+tags: ["oracle", "tablespace", "datafile", "storage management", "dba", "sql"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Tablespace Yönetimi ve Datafile İşlemleri
+
+Oracle veritabanında tüm fiziksel veri, **Tablespace** adı verilen mantıksal yapılarda tutulur. Tablespace yönetimi, bir DBA'nın en çok zaman harcadığı alanlardan biridir. Depolama alanını optimize etmek, hiyerarşiyi korumak ve disk doluluklarını önceden sezmek için kullanılan ana scriptleri bu makalede özetledik.
+
+
+<!--truncate-->
+## Tablespace Doluluk Oranı Analizi
+
+Veritabanındaki hangi tablespace'in % kaçının dolu olduğunu görmek, proaktif yönetim için ilk adımdır.
+
+### SQL Sorgusu: Kapsamlı Doluluk Raporu (Nagios Uyumlu)
+
+```sql
+SELECT a.tablespace_name,
+       ROUND(a.total_mb) AS total_mb,
+       ROUND(a.total_mb - b.free_mb) AS used_mb,
+       ROUND(b.free_mb) AS free_mb,
+       ROUND((1 - (b.free_mb / a.total_mb)) * 100, 2) AS pct_used,
+       ROUND(a.max_mb) AS max_size_mb
+FROM (SELECT tablespace_name,
+             SUM(bytes) / 1024 / 1024 AS total_mb,
+             SUM(MAXBYTES) / 1024 / 1024 AS max_mb
+      FROM dba_data_files
+      GROUP BY tablespace_name) a,
+     (SELECT tablespace_name,
+             SUM(bytes) / 1024 / 1024 AS free_mb
+      FROM dba_free_space
+      GROUP BY tablespace_name) b
+WHERE a.tablespace_name = b.tablespace_name(+)
+ORDER BY pct_used DESC;
+```
+
+<Callout type="info" title="MAX_SIZE_MB Neden Önemli?">
+Eğer datafile'larınız `AUTOEXTEND ON` modundaysa, `total_mb` değeri sizi yanıltabilir. `max_mb` sütunu, diskin elverdiği son noktayı gösterir.
+</Callout>
+
+## Datafile İşlemleri
+
+Tablespace dolduğunda yeni alan açmak için iki seçeneğiniz vardır: Mevcut datafile'ı büyütmek veya yeni bir datafile eklemek.
+
+### Yeni Datafile Ekleme
+
+```sql
+ALTER TABLESPACE users 
+ADD DATAFILE '/u01/oradata/PROD/users02.dbf' 
+SIZE 1G AUTOEXTEND ON NEXT 100M MAXSIZE 10G;
+```
+
+### Mevcut Datafile'ı Re-sizing (Büyütme/Küçültme)
+
+```sql
+ALTER DATABASE DATAFILE '/u01/oradata/PROD/users01.dbf' RESIZE 5G;
+```
+
+## Tablespace Taşıma (Rename/Move Datafile)
+
+Bir datafile'ı farklı bir diske veya ASM disk grubuna taşımak gerekebilir.
+
+### Online Datafile Taşıma (Oracle 12c ve Sonrası)
+
+```sql
+ALTER DATABASE MOVE DATAFILE '/old_path/data01.dbf' TO '/new_path/data01.dbf';
+```
+
+### Offline Datafile Taşıma (Oracle 11g ve Öncesi)
+
+1. Tablespace'i offline yapın: `ALTER TABLESPACE users OFFLINE;`
+2. Dosyayı OS seviyesinde kopyalayın: `cp /old/file.dbf /new/file.dbf`
+3. Oracle'da dosya adresini güncelleyin: `ALTER DATABASE RENAME FILE '/old/file.dbf' TO '/new/file.dbf';`
+4. Tablespace'i online yapın: `ALTER TABLESPACE users ONLINE;`
+
+## Geçici ve Undo Tablespace Yönetimi
+
+**TEMP** ve **UNDO** tablespace'leri, veritabanı performansını doğrudan etkiler. Özellikle TEMP alanının dolması (`ORA-01652: unable to extend temp segment`) batch job'ların çökmesine neden olur.
+
+### Temp Kullanımını İzleme
+
+```sql
+SELECT s.sid, s.username, s.program,
+       u.tablespace, u.contents, u.extents, u.blocks
+FROM v$session s, v$sort_usage u
+WHERE s.saddr = u.session_addr;
+```
+
+## Sonuç
+
+Doğru yapılandırılmış bir tablespace yönetimi, veritabanının fiziksel sağlığını korur. Dosya boyutlarını kontrol altında tutmak, `AUTOEXTEND` limitlerini doğru set etmek ve `MAXSIZE` belirlemek, kontrolsüz disk doluluklarının önüne geçer.

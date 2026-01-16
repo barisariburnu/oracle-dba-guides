@@ -1,0 +1,67 @@
+---
+title: "Oracle Exadata: Smart Scan ve Cell Offload Verimlilik Analizi"
+description: "Oracle Exadata platformunda Smart Scan (Cell Offload) verimliliğini ölçme, IO_CELL_OFFLOAD_ELIGIBLE_BYTES ile veritabanı performansını analiz etme rehberi."
+date: "2026-01-16"
+category: "Exadata"
+tags: ["Oracle Exadata", "Smart Scan", "Cell Offload", "Performance Optimization", "Database Machine", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Exadata: Smart Scan ve Cell Offload Verimliliği
+
+Oracle **Exadata**, veritabanı sorgularını storage (depolama) seviyesine kadar indirebilen (Offload) dünyadaki en güçlü veritabanı makinesidir. Bu özelliğin kalbinde **Smart Scan** teknolojisi yatar. Smart Scan sayesinde veritabanı sunucusu, tüm tabloyu hafızaya çekip filtrelemek yerine, sadece sorgu için gereken satırları ve kolonları "Storage Cell" seviyesinde filtreler ve sadece sonucu veritabanı sunucusuna gönderir. Bu da ağ trafiğini (interconnect) binlerce kat azaltabilir. Bu makalede, sorgularınızın Exadata'nın bu gücünden ne kadar yararlandığını (Saved %) nasıl ölçeceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Cell Offload Nedir?
+
+Normal bir veritabanında sorgu kurgusu şöyledir:
+-   **Sunucu:** "Bana 100 GB'lık satış tablosunun tamamını gönder."
+-   **Depolama:** 100 GB veriyi sunucuya gönderir.
+-   **Sunucu:** Veriyi inceler ve sadece "İstanbul" olanları ayırır (örn: 100 MB).
+
+Exadata'da ise:
+-   **Sunucu:** "Bana satış tablosundan sadece 'İstanbul' satırlarını gönder."
+-   **Cell Server:** Kendi CPU'sunu kullanarak filtrelemeyi yapar ve sunucuya sadece 100 MB'lık ilgili veriyi gönderir.
+
+---
+
+## 2. Sorguların Offload Başarısını Ölçme
+
+Bir `SQL_ID`'nin Exadata üzerinde ne kadar başarılı bir "Smart Scan" yaptığını, yani ağdan kurtarılan (Saved) veri miktarını şu sorgu ile bulabilirsiniz:
+
+```sql
+SELECT inst_id,
+       sql_id,
+       executions AS execs,
+       ROUND(elapsed_time/DECODE(executions,0,1,executions)/1000000, 2) AS sec_per_exec,
+       DECODE(io_cell_offload_eligible_bytes, 0, 'NO', 'YES') AS is_offload,
+       -- Kurtarılan veri yüzdesi (%)
+       DECODE(io_cell_offload_eligible_bytes, 0, 0,
+              ROUND((io_cell_offload_eligible_bytes - io_interconnect_bytes) / 
+                    DECODE(io_cell_offload_eligible_bytes, 0, 1, io_cell_offload_eligible_bytes) * 100, 2)
+       ) AS pct_saved,
+       SUBSTR(sql_text, 1, 100) AS sql_short
+FROM gv$sql
+WHERE sql_id = :target_sql_id -- Örn: '7138nj0ch8ym8'
+  AND executions > 0;
+```
+
+---
+
+## 3. Offload ve Smart Scan Şartları
+
+Her sorgu Smart Scan yapamaz. Bir sorgunun offload edilebilmesi için şu şartlar gerekir:
+1.  **Full Scan:** Sorgu `Full Table Scan` veya `Index Fast Full Scan` yapmalıdır. (Index Range Scan'ler offload edilmez).
+2.  **Direct Path Read:** Veriler SGA (Buffer Cache) yerine doğrudan sunucu belleğine (PGA) okunmalıdır.
+3.  **Hücre İzinleri:** Cell server üzerinde offload paketleri aktif olmalıdır.
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **Saved %90+ :** Sorgunuz Exadata üzerinde mükemmel çalışıyor demektir.
+-   **Saved %0 :** Sorgu muhtemelen index üzerinden tek tek satır çekiyor veya offload edilmesine engel bir durum var (örn: verilerin encrypt olması ama cell seviyesinde key olmaması gibi).
+-   **Bloom Filter:** Join işlemlerinde de Exadata, Bloom filter kullanarak bir tablonun filtresini diğer tablonun offload işlemine enjekte edebilir.
+
+Exadata yatırımlarının karşılığını almak için "Smart Scan" oranlarını takip etmek, DBA'nın en önemli performans metriğidir. Eğer sorgularınız offload olmuyorsa, Exadata sadece "pahalı bir depolama birimi" olarak çalışıyor demektir.

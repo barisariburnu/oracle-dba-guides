@@ -1,0 +1,106 @@
+---
+title: "Oracle Veritabanı Temel Yönetimi: Manuel DB Kurulumu, DB Link ve DDL Takibi"
+description: "Oracle veritabanında manuel veritabanı oluşturma adımları, Database Link (DB Link) yapılandırması, karakter seti kontrolü ve DDL işlemlerini loglama."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "DB Link", "Manual Database Creation", "DDL Logging", "Character Set", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Temel Yönetim Rehberi
+
+Veritabanı yönetimi sadece performans iyileştirmeden ibaret değildir; sistemin temel taşlarını (kurulum, bağlantılar ve izleme) sağlam oturtmak gerekir. Bu makalede, manuel veritabanı oluşturma, DB Link yapılandırması ve veritabanı seviyesindeki DDL değişikliklerini nasıl takip edebileceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Manuel Veritabanı Oluşturma adımları
+
+Gerekli durumlarda (DBCA kullanılamadığında), bir veritabanını manuel olarak `CREATE DATABASE` komutu ile oluşturabilirsiniz.
+
+### Temel Adımlar:
+1.  ** Bash Profile Ayarı:** `ORACLE_SID` ve `ORACLE_HOME` değişkenlerini tanımlayın.
+2.  ** PFILE Oluşturma:** `init.ora` dosyasını hazırlayın.
+3.  ** Instance Başlatma:** `STARTUP NOMOUNT` modunda başlatın.
+4.  ** Komutu Çalıştırma:**
+```sql
+CREATE DATABASE ORCL
+   USER SYS IDENTIFIED BY "password123"
+   USER SYSTEM IDENTIFIED BY "password123"
+   LOGFILE GROUP 1 ('/oradata/redo01.log') SIZE 100M,
+           GROUP 2 ('/oradata/redo02.log') SIZE 100M
+   CHARACTER SET AL32UTF8
+   NATIONAL CHARACTER SET AL16UTF16
+   DATAFILE '/oradata/system01.dbf' SIZE 500M EXTENT MANAGEMENT LOCAL
+   SYSAUX DATAFILE '/oradata/sysaux01.dbf' SIZE 500M
+   DEFAULT TEMPORARY TABLESPACE temp TEMPFILE '/oradata/temp01.dbf' SIZE 100M
+   UNDO TABLESPACE undotbs1 DATAFILE '/oradata/undotbs01.dbf' SIZE 200M;
+```
+5.  ** Sözlük Kataloglarını Çalıştırma:** `@?/rdbms/admin/catalog.sql` ve `@?/rdbms/admin/catproc.sql` scriptlerini çalıştırın.
+
+---
+
+## 2. Database Link (DB Link) Oluşturma
+
+DB Link, bir veritabanından diğerine erişim sağlamak için kullanılan köprüdür.
+
+```sql
+-- Public DB Link Oluşturma
+CREATE PUBLIC DATABASE LINK TO_PROD_DB
+CONNECT TO remote_user IDENTIFIED BY "password123"
+USING 'TNS_ALIAS';
+
+-- Kullanım Örneği
+SELECT * FROM users@TO_PROD_DB;
+```
+
+---
+
+## 3. Karakter Seti (Character Set) Kontrolü
+
+Veritabanının hangi karakter setini kullandığını bilmek, veri aktarımlarında bozulmaları önlemek için kritiktir.
+
+```sql
+SELECT * FROM nls_database_parameters
+WHERE parameter IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET');
+```
+
+---
+
+## 4. DDL Takibi: Kim Hangi Tabloyu Sildi?
+
+Veritabanında yapılan yapısal değişiklikleri (CREATE, ALTER, DROP) bir log tablosuna kaydetmek, güvenlik ve denetim için harika bir yöntemdir.
+
+### Log Tablosu ve Trigger Oluşturma:
+```sql
+CREATE TABLE MONI.DDL_LOG (
+  ddl_date       DATE,
+  ora_login_user VARCHAR2(100),
+  object_owner   VARCHAR2(100),
+  object_name    VARCHAR2(100),
+  ddl_event      VARCHAR2(100),
+  ip_address     VARCHAR2(50),
+  sql_text       CLOB
+);
+
+CREATE OR REPLACE TRIGGER DDL_LOG_TRG
+   AFTER DDL ON DATABASE
+BEGIN
+   INSERT INTO MONI.DDL_LOG (
+      ddl_date, ora_login_user, object_owner, object_name, ddl_event, ip_address
+   )
+   VALUES (
+      SYSDATE,
+      SYS_CONTEXT('USERENV', 'SESSION_USER'),
+      ORA_DICT_OBJ_OWNER,
+      ORA_DICT_OBJ_NAME,
+      ORA_SYSEVENT,
+      SYS_CONTEXT('USERENV', 'IP_ADDRESS')
+   );
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+/
+```
+
+## Özet
+
+Temel yapılandırmalar veritabanının iskeletidir. Manuel kurulum süreci mimariyi anlamanızı sağlarken, DB Link ve DDL loglama gibi araçlar günlük operasyonlarınızı ve güvenliğinizi pekiştirir.

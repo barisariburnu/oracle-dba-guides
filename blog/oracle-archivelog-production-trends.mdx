@@ -1,0 +1,88 @@
+---
+title: "Oracle Archivelog Üretim Trendi ve Saatlik Analiz"
+description: "Veritabanı aktivite yoğunluğunu anlamak için archivelog üretim sayılarını günlük ve saatlik bazda analiz eden gelişmiş SQL sorguları."
+date: 2026-01-16
+category: "Oracle Performans"
+tags: ["oracle", "archivelog", "performance", "activity monitoring", "dba", "sql"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Archivelog Üretim Trendi ve Saatlik Analiz
+
+Oracle veritabanında archivelog üretim hızı, veritabanı üzerindeki DML (Insert, Update, Delete) aktivitesinin en net göstergesidir. Log switch pattern'larını analiz ederek veritabanının peak saatlerini, backup zamanlamasının uygunluğunu ve kapasite ihtiyacını belirleyebiliriz.
+
+
+<!--truncate-->
+## Günlük Archivelog Üretim Trendi
+
+Veritabanının son birkaç gündeki aktivite seviyesini görmek için günlük üretilen archivelog sayılarını inceleyebiliriz.
+
+### SQL Sorgusu: Günlük Üretim Sayısı
+
+```sql
+SELECT TO_CHAR(completion_time, 'DD.MM.YYYY') AS tarih,
+       COUNT(*) AS archivelog_sayisi
+FROM v$archived_log
+WHERE completion_time > SYSDATE - 10
+GROUP BY TO_CHAR(completion_time, 'DD.MM.YYYY')
+ORDER BY 1;
+```
+
+Bu sorgu, veritabanının hangi günlerde normalin üzerinde bir yükle çalıştığını (örneğin toplu veri yükleme veya batch job günleri) kolayca görmemizi sağlar.
+
+## Saatlik Bazda Matrix (Pivot) Analizi
+
+En detaylı analiz, archivelog üretimini saat bazında bir matris (matrix) formatında görmektir. Bu sayede gün içindeki yoğunluk (peak) saatleri net bir şekilde ortaya çıkar.
+
+### SQL Sorgusu: Saatlik Log Switch Matrisi
+
+```sql
+SELECT TO_CHAR(first_time, 'YYYY-MON-DD') AS gun,
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '00', 1, 0)), '99') "00",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '01', 1, 0)), '99') "01",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '02', 1, 0)), '99') "02",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '03', 1, 0)), '99') "03",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '04', 1, 0)), '99') "04",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '05', 1, 0)), '99') "05",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '06', 1, 0)), '99') "06",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '07', 1, 0)), '99') "07",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '08', 1, 0)), '99') "08",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '09', 1, 0)), '99') "09",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '10', 1, 0)), '99') "10",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '11', 1, 0)), '99') "11",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '12', 1, 0)), '99') "12",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '13', 1, 0)), '99') "13",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '14', 1, 0)), '99') "14",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '15', 1, 0)), '99') "15",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '16', 1, 0)), '99') "16",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '17', 1, 0)), '99') "17",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '18', 1, 0)), '99') "18",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '19', 1, 0)), '99') "19",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '20', 1, 0)), '99') "20",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '21', 1, 0)), '99') "21",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '22', 1, 0)), '99') "22",
+       TO_CHAR(SUM(DECODE(TO_CHAR(first_time, 'HH24'), '23', 1, 0)), '99') "23"
+FROM v$log_history
+WHERE first_time > SYSDATE - 30
+GROUP BY TO_CHAR(first_time, 'YYYY-MON-DD')
+ORDER BY 1 DESC;
+```
+
+## Analiz Sonuçlarının Yorumlanması
+
+### 1. Peak Saatler ve Backup
+Eğer gece 02:00 - 04:00 saatleri arasında log switch sayısı çok fazlaysa, bu genelde toplu işlerin (job) veya yedekleme süreçlerinin disk I/O yükü ile birleştiğini gösterir. Backup job'ınızı daha sakin bir saate kaydırmayı düşünebilirsiniz.
+
+### 2. Kapasite Planlaması
+Ortalama günlük archivelog boyutunu (Sayısı * Redo Size) hesaplayarak, backup disk alanınızın ne kadar sürede dolacağını öngörebilirsiniz.
+
+### 3. Uygulama Yük Pattern'ı
+Hafta sonları log üretiminin düşmesi beklenen bir durumdur. Eğer hafta sonu beklenmedik bir log üretimi varsa, arka planda çalışan veya takılı kalmış bir job'dan şüphelenebilirsiniz.
+
+<Callout type="info" title="İpucu">
+Bu raporu düzenli olarak (örneğin haftalık) alarak veritabanınızın "normalini" (baseline) belirleyin. Normal dışı her sapma bir performans sorununun habercisi olabilir.
+</Callout>
+
+## Sonuç
+
+Archivelog analizi sadece depolama alanı yönetimi için değil, veritabanı performans tuning işlemleri için de temel bir veridir. Matrix formatındaki bu rapor, komplike sorgularla uğraşmadan sistemin röntgenini çekmenizi sağlar.

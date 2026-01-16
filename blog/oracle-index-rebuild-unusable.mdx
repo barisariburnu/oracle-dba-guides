@@ -1,0 +1,423 @@
+---
+title: "Oracle Index Rebuild ve Unusable Index Yönetimi - Complete Guide"
+description: "Oracle unusable index tespiti, index rebuild scriptleri, partition index yönetimi ve online index rebuild işlemleri ile performans optimizasyonu."
+date: 2025-01-16
+category: "Oracle Performance"
+tags: ["oracle", "index", "rebuild", "performance", "dba", "tuning", "optimization"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Index Rebuild ve Unusable Index Yönetimi
+
+Oracle veritabanlarında **unusable indexler**, **fragmented indexler** ve **partition index** yönetimi performans için kritiktir. Bu yazıda unusable index tespiti, **online rebuild**, ve **partition index** yönetimi scriptlerini paylaşacağım.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Unusable index'ler query plan'ını olumsuz etkiler ve full table scan'e neden olur. Düzenli kontrol ve rebuild gerekir.
+</Callout>
+
+## Script'in Amacı
+
+Bu scriptler ile şu işlemler gerçekleştirilir:
+
+- **Unusable index** tespiti
+- **Online index rebuild** komutları oluşturma
+- **Partition ve subpartition** index rebuild
+- **Table partition** move işlemleri
+- **Tablespace change** ile index rebuild
+
+## Önkoşullar
+
+- **DBA yetkisi**
+- **Yeterli disk alanı** (rebuild sırasında)
+- **Maintenance window** (production için)
+
+## Unusable Index Tespiti
+
+### 1. Tüm Unusable Index'leri Bul
+
+```sql
+-- Index, partition ve subpartition seviyesinde unusable objeleri listele
+SET linesize 158
+COLUMN object_type FORMAT a20
+COLUMN index_name FORMAT a30
+COLUMN partition_name FORMAT a30
+COLUMN subpartition_name FORMAT a30
+COLUMN owner FORMAT a20
+
+SELECT 'INDEX' AS object_type,
+       owner,
+       index_name,
+       NULL AS partition_name,
+       NULL AS subpartition_name
+FROM   dba_indexes
+WHERE  status = 'UNUSABLE'
+UNION ALL
+SELECT 'PARTITION' AS object_type,
+       index_owner AS owner,
+       index_name,
+       partition_name,
+       NULL AS subpartition_name
+FROM   dba_ind_partitions
+WHERE  status = 'UNUSABLE'
+UNION ALL
+SELECT 'SUBPARTITION' AS object_type,
+       index_owner AS owner,
+       index_name,
+       partition_name,
+       subpartition_name
+FROM   dba_ind_subpartitions
+WHERE  status = 'UNUSABLE'
+ORDER  BY object_type, owner, index_name;
+```
+
+**Çıktı Örneği:**
+
+```
+OBJECT_TYPE  OWNER           INDEX_NAME                   PARTITION_NAME         SUBPARTITION_NAME
+------------ --------------- ---------------------------- ---------------------- ----------------------
+INDEX        SCOTT           PK_EMPLOYEES
+PARTITION    SH              SALES_TIME_BIX              SALES_Q1_2000
+SUBPARTITION SH              SALES_CHANNEL_BIX           SALES_Q1_2000_C
+```
+
+### 2. Count Unusable Indexes
+
+```sql
+-- Toplam unusable index sayısı
+SELECT COUNT(*) AS total_unusable_indexes
+FROM   (SELECT index_name
+        FROM   dba_indexes
+        WHERE  status = 'UNUSABLE'
+        UNION ALL
+        SELECT index_name
+        FROM   dba_ind_partitions
+        WHERE  status = 'UNUSABLE'
+        UNION ALL
+        SELECT index_name
+        FROM   dba_ind_subpartitions
+        WHERE  status = 'UNUSABLE');
+```
+
+## Index Rebuild Scriptleri
+
+### 3. Unusable Index Rebuild Komutları
+
+```sql
+-- Unusable index'ler için rebuild script'i oluştur
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER INDEX ' || owner || '.' || index_name || ' REBUILD ONLINE PARALLEL 16;'
+FROM   dba_indexes
+WHERE  status = 'UNUSABLE'
+UNION ALL
+SELECT 'ALTER INDEX ' || index_owner || '.' || index_name ||
+       ' REBUILD PARTITION ' || partition_name ||
+       ' TABLESPACE ' || tablespace_name || ' ONLINE;'
+FROM   dba_ind_partitions
+WHERE  status = 'UNUSABLE'
+UNION ALL
+SELECT 'ALTER INDEX ' || index_owner || '.' || index_name ||
+       ' REBUILD SUBPARTITION ' || subpartition_name ||
+       ' TABLESPACE ' || tablespace_name || ' ONLINE;'
+FROM   dba_ind_subpartitions
+WHERE  status = 'UNUSABLE';
+```
+
+**Çıktı:**
+
+```sql
+ALTER INDEX SCOTT.PK_EMPLOYEES REBUILD ONLINE PARALLEL 16;
+ALTER INDEX SH.SALES_TIME_BIX REBUILD PARTITION SALES_Q1_2000 TABLESPACE USERS ONLINE;
+ALTER INDEX SH.SALES_CHANNEL_BIX REBUILD SUBPARTITION SALES_Q1_2000_C TABLESPACE USERS ONLINE;
+```
+
+<Callout type="warning" title="Uyarı">
+ONLINE REBUILD:
+- DML operasyonlarını engellemez
+- Daha fazla kaynak tüketir
+- Enterprise Edition'da mevcuttur
+- Büyük index'ler için PARALLEL kullanın
+</Callout>
+
+### 4. Table Partition Move (Tablespace Change)
+
+```sql
+-- Table partition'ları farklı tablespace'e taşıma script'i
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER TABLE ' || owner || '.' || segment_name ||
+       ' MOVE PARTITION ' || partition_name ||
+       ' TABLESPACE tmsdata28 UPDATE GLOBAL INDEXES;'
+FROM   dba_segments
+WHERE  tablespace_name = '+DATA'
+       AND segment_type = 'TABLE PARTITION';
+```
+
+**Çıktı:**
+
+```sql
+ALTER TABLE SH.SALES MOVE PARTITION SALES_Q1_2000 TABLESPACE TMSDATA28 UPDATE GLOBAL INDEXES;
+ALTER TABLE SH.SALES MOVE PARTITION SALES_Q2_2000 TABLESPACE TMSDATA28 UPDATE GLOBAL INDEXES;
+```
+
+**Önemli Notlar:**
+- **UPDATE GLOBAL INDEXES:** Global index'leri invalid olmaktan korur
+- **ONLINE:** Oracle 12c R2 ve sonrası mevcuttur
+- **Move işlemi sırasında table lock olur**
+
+### 5. Table Subpartition Move
+
+```sql
+-- Table subpartition move script'i
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER TABLE ' || owner || '.' || segment_name ||
+       ' MOVE SUBPARTITION ' || partition_name ||
+       ' TABLESPACE DATA20 UPDATE GLOBAL INDEXES;'
+FROM   dba_segments
+WHERE  tablespace_name = 'DATA01'
+       AND segment_type = 'TABLE SUBPARTITION'
+       AND segment_name = 'FATURA_HAREKET';
+```
+
+### 6. Tablespace bazlı Index Rebuild
+
+```sql
+-- Belirli bir tablespace'deki tüm index'leri rebuild et
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER INDEX ' || owner || '.' || index_name ||
+       ' REBUILD TABLESPACE INDEXES ONLINE;'
+FROM   dba_indexes
+WHERE  tablespace_name = 'INDEXES';
+```
+
+### 7. Segment bazlı Index Rebuild
+
+```sql
+-- Belirli tablespace'deki tüm index segment'lerini rebuild et
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER INDEX ' || owner || '.' || segment_name ||
+       ' REBUILD TABLESPACE TMSIND48 ONLINE;'
+FROM   dba_segments
+WHERE  tablespace_name = 'TMSIND10'
+       AND segment_type = 'INDEX';
+```
+
+### 8. Index Partition Rebuild
+
+```sql
+-- Partitioned index'leri rebuild et
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER INDEX ' || owner || '.' || segment_name ||
+       ' REBUILD PARTITION ' || partition_name ||
+       ' TABLESPACE TMSIND48 ONLINE;'
+FROM   dba_segments
+WHERE  tablespace_name = 'TMSIND10'
+       AND segment_type = 'INDEX PARTITION';
+```
+
+### 9. Index Subpartition Rebuild
+
+```sql
+-- Subpartitioned index'leri rebuild et
+SET linesize 158
+SET head off
+SET echo off
+SET feedback off
+SELECT 'ALTER INDEX ' || owner || '.' || segment_name ||
+       ' REBUILD SUBPARTITION ' || partition_name ||
+       ' TABLESPACE TMSIND48 ONLINE;'
+FROM   dba_segments
+WHERE  tablespace_name = 'TMSIND10'
+       AND segment_type = 'INDEX SUBPARTITION';
+```
+
+## Index Fragmentation Analizi
+
+### 10. Fragmented Index Tespiti
+
+```sql
+-- Yüksek fragmentation oranına sahip index'leri bul
+SELECT owner,
+       index_name,
+       table_name,
+       blevel,
+       leaf_blocks,
+       num_rows,
+       ROUND((del_lf_rows / lf_rows) * 100, 2) AS deletion_ratio,
+       ROUND((lf_rows_len / leaf_blocks), 2) AS bytes_per_block
+FROM   index_stats
+WHERE  name IN (SELECT index_name
+                FROM   dba_indexes
+                WHERE  status = 'VALID')
+       AND (del_lf_rows / lf_rows) > 0.2;
+```
+
+**Analiz:**
+- **deletion_ratio &gt; %20:** Index rebuild gerekebilir
+- **blevel &gt; 4:** Index depth fazla, rebuild düşünülebilir
+- **bytes_per_block düşük:** Sparse data, rebuild yardımcı olabilir
+
+### 11. Index Statistics Analysis
+
+```sql
+-- Index statistics'i analyze et ve fragmentation hesapla
+ANALYZE INDEX scott.pk_employees VALIDATE STRUCTURE;
+
+SELECT name,
+       height,
+       blocks,
+       lf_rows,
+       del_lf_rows,
+       lf_blks,
+       br_blks
+FROM   index_stats;
+```
+
+**Çıktı:**
+
+```
+NAME                           HEIGHT   BLOCKS    LF_ROWS    DEL_LF_ROWS   LF_BLKS   BR_BLKS
+------------------------------ -------- --------- ---------- ------------- -------- ----------
+PK_EMPLOYEES                        3       150      50000          5000       125        25
+```
+
+**Interpretasyon:**
+- **HEIGHT:** Index depth (3+ ise rebuild düşünün)
+- **DEL_LF_ROWS:** Silinmiş row count (yükseğe rebuild)
+- **LF_ROWS:** Total leaf rows
+
+## Kullanım Senaryoları
+
+### Senaryo 1: Maintenance Window'da Rebuild
+
+```sql
+-- Script'i çalıştır ve output'u dosyaya kaydet
+SPOOL index_rebuild.sql
+
+-- Unusable index rebuild
+SELECT 'ALTER INDEX ' || owner || '.' || index_name || ' REBUILD;'
+FROM   dba_indexes
+WHERE  status = 'UNUSABLE';
+
+SPOOL OFF
+
+-- Çıktıyı execute et
+@index_rebuild.sql
+```
+
+### Senaryo 2: Parallel Rebuild
+
+```sql
+-- Parallel degree ile rebuild (büyük index'ler için)
+ALTER INDEX scott.large_index rebuild parallel 16;
+ALTER INDEX scott.large_index logging; -- Logging'i tekrar aç
+ALTER INDEX scott.large_index noparallel; -- Parallel'i kapat
+```
+
+### Senaryo 3: Tablespace Migration
+
+```sql
+-- Index'leri yeni tablespace'e taşı
+BEGIN
+  FOR idx_rec IN (SELECT owner, index_name
+                  FROM   dba_indexes
+                  WHERE  tablespace_name = 'OLD_TBS')
+  LOOP
+    EXECUTE IMMEDIATE 'ALTER INDEX ' || idx_rec.owner || '.' ||
+                     idx_rec.index_name || ' REBUILD TABLESPACE NEW_TBS ONLINE';
+  END LOOP;
+END;
+/
+```
+
+## Best Practices
+
+### 1. Rebuild Stratejisi
+
+```sql
+-- Coalesce ile online rebuild (daha az resource kullanır)
+ALTER INDEX scott.pk_employees COALESCE;
+
+-- Shrink space (segment'i küçült)
+ALTER INDEX scott.pk_employees SHRINK SPACE;
+```
+
+### 2. Invisible Index Kullanımı
+
+```sql
+-- Index'i invisible yap ve test et
+ALTER INDEX scott.pk_employees INVISIBLE;
+
+-- Query plan'ı kontrol et
+EXPLAIN PLAN FOR
+SELECT * FROM scott.employees WHERE employee_id = 100;
+
+SELECT * FROM TABLE(dbms_xplan.display);
+
+-- Başarılıysa drop et, değilse visible yap
+ALTER INDEX scott.pk_employees VISIBLE;
+```
+
+### 3. Index Monitoring
+
+```sql
+-- Index monitoring'i başlat
+ALTER INDEX scott.pk_employees MONITORING USAGE;
+
+-- Kullanım durumunu kontrol et (bir süre sonra)
+SELECT * FROM v$object_usage
+WHERE  index_name = 'PK_EMPLOYEES';
+
+-- Monitoring'i durdur
+ALTER INDEX scott.pk_employees NOMONITORING USAGE;
+```
+
+### 4. Online Rebuild İpuçları
+
+```sql
+-- 12c R2 ve sonrası: Online table rebuild
+ALTER TABLE scott.employees MOVE TABLESPACE users ONLINE;
+
+-- Lock hesaplaması:
+-- - ONLINE yok: Table lock (DML bloke)
+-- - ONLINE var: Row-level lock (DML devam eder)
+```
+
+## Performance Etkileri
+
+**Rebuild Öncesi:**
+- Full scan cost'u yüksek
+- Index scan yapmıyor
+- CPU usage yüksek
+
+**Rebuild Sonrası:**
+- Index scan aktif
+- I/O azalması
+- CPU usage düşüşü
+- Query time iyileşmesi
+
+## İlgili Kaynaklar
+
+- [Index Rebuild Best Practices](https://docs.oracle.com/en/database/oracle/oracle-database/19/tgdba/managing-indexes.html)
+- [Online Index Rebuild](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/ALTER-INDEX.html)
+- [Index Statistics](https://docs.oracle.com/en/database/oracle/oracle-database/19/arpls/INDEX_STATS.html)
+
+Bu yazıda index rebuild ve unusable index yönetimini öğrendiniz. Diğer performance tuning konuları için blog yazılarımızı takip edin.

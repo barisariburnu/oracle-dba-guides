@@ -1,0 +1,167 @@
+---
+title: "Oracle Memory Architecture: SGA, PGA ve Advisor Tuning Rehberi"
+description: "Oracle veritabanında bellek yönetimi (SGA, PGA, AMM, ASMM), Memory Advisor kullanımı ve performans optimizasyonu için bellek ayarlama teknikleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Memory", "SGA", "PGA", "Memory Advisor", "AMM", "ASMM", "Performance Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Memory Architecture ve Advisor Tuning
+
+Oracle veritabanında bellek yönetimi, sistem performansını doğrudan etkileyen en kritik unsurlardan biridir. Yanlış yapılandırılmış bir bellek mimarisi, aşırı disk I/O'suna (swapping/paging) veya yetersiz kaynak kullanımına yol açabilir. Bu makalede, Oracle'ın bellek bileşenlerini (SGA ve PGA), otomatik ve manuel bellek yönetimi yöntemlerini ve **Memory Advisor** araçlarını kullanarak sistemi nasıl optimize edeceğinizi detaylı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+## Oracle Bellek Bileşenleri
+
+Oracle veritabanı belleği temel olarak iki ana bölüme ayrılır:
+
+### 1. SGA (System Global Area)
+Instance seviyesinde paylaşılan bellek alanıdır. İçinde şunları barındırır:
+- **Database Buffer Cache:** Diskten okunan veri bloklarının saklandığı yer.
+- **Shared Pool:** SQL kodları, execution planlar ve veri sözlüğü (data dictionary) bilgilerini tutar.
+- **Redo Log Buffer:** Commit edilen işlemlerin log bilgilerini geçici olarak saklar.
+- **Large Pool:** Büyük I/O işlemleri, yedekleme (RMAN) ve parallel query processleri için kullanılır.
+
+### 2. PGA (Program Global Area)
+Her bir server process (kullanıcı oturumu) için ayrılan özel bellek alanıdır. Şunları içerir:
+- **SQL Work Areas:** Sort (sıralama), hash join ve bitmap işlemleri burada yapılır.
+- **Session Memory:** Kullanıcı oturumuna özel değişkenler ve durum bilgileri.
+
+---
+
+## Bellek Yönetim Modları
+
+Oracle, versiyonlara göre farklı bellek yönetim modları sunar:
+
+### AMM (Automatic Memory Management) - 11g+
+Tüm belleği (`MEMORY_TARGET`) tek bir havuz olarak Oracle yönetir. SGA ve PGA arasındaki dağılım otomatik yapılır.
+```sql
+ALTER SYSTEM SET memory_target = 4G SCOPE = BOTH;
+ALTER SYSTEM SET memory_max_target = 6G SCOPE = SPFILE;
+```
+
+### ASMM (Automatic Shared Memory Management) - 10g+
+SGA bileşenleri (`SGA_TARGET`) otomatik yönetilirken, PGA ayrı yönetilir (`PGA_AGGREGATE_TARGET`).
+```sql
+ALTER SYSTEM SET sga_target = 2G SCOPE = BOTH;
+ALTER SYSTEM SET pga_aggregate_target = 1G SCOPE = BOTH;
+```
+
+### Manual Memory Management
+Her bir havuz (buffer cache, shared pool vb.) manuel olarak ayarlanır. Modern sistemlerde önerilmez ancak çok özel tuning durumlarında gerekebilir.
+
+---
+
+## Memory Advisor ile Optimizasyon
+
+Oracle, mevcut bellek kullanımına bakarak sistemin ne kadar belleğe ihtiyacı olduğunu tahmin eden "Advisor" (Danışman) görünümleri sunar.
+
+### 1. Memory Target Advice (AMM için)
+Mevcut `memory_target` değerini artırırsanız veya azaltırsanız performansın (DB Time) nasıl değişeceğini gösterir.
+```sql
+SELECT memory_size_factor,
+       memory_size,
+       estd_db_time,
+       estd_db_time_factor,
+       CASE
+           WHEN estd_db_time_factor < 0.9 THEN 'SGA/PGA yetersiz, artırılmalı'
+           WHEN estd_db_time_factor > 1.1 THEN 'Bellek fazla, azaltılabilir'
+           ELSE 'Mevcut ayar optimal'
+       END AS recommendation
+FROM v$memory_target_advice
+ORDER BY memory_size_factor;
+```
+
+### 2. PGA Aggregate Target Advice
+PGA boyutunun yetersiz olduğu durumlarda "Multi-Pass" (diske yazarak sıralama) işlemleri artar. Bu sorgu ile ideal PGA boyutunu bulabilirsiniz.
+```sql
+SELECT pga_target_for_estimate / (1024*1024) AS pga_target_mb,
+       pga_target_factor,
+       estd_pga_cache_hit_percentage,
+       estd_overalloc_count,
+       estd_time
+FROM v$pga_target_advice
+ORDER BY pga_target_for_estimate;
+```
+<Callout type="info">
+`estd_overalloc_count` değerinin 0 olduğu en düşük PGA boyutunu seçmek genellikle en güvenli yoldur.
+</Callout>
+
+### 3. Buffer Cache Advice
+Veri bloklarının ne kadarının hafızada tutulabildiğini analiz eder.
+```sql
+SELECT size_for_estimate, 
+       buffers_for_estimate, 
+       estd_physical_read_factor, 
+       estd_physical_reads
+FROM v$db_cache_advice;
+```
+
+---
+
+## Gelişmiş Monitoring Sorguları
+
+### Bellek Dinamik Bileşenleri
+SGA ve PGA'daki anlık dağılımı görmek için:
+```sql
+SELECT component,
+       current_size / (1024*1024) as current_mb,
+       min_size / (1024*1024) as min_mb,
+       max_size / (1024*1024) as max_mb,
+       user_specified_size / (1024*1024) as manual_mb,
+       last_oper_type,
+       last_oper_time
+FROM v$memory_dynamic_components
+WHERE current_size > 0
+ORDER BY current_mb DESC;
+```
+
+### PGA Work Area Kullanımı (Optimal vs Multi-Pass)
+Sıralama işlemlerinin diske düşüp düşmediğini kontrol edin:
+```sql
+SELECT name, value
+FROM v$pgastat
+WHERE name IN ('aggregate PGA target parameter', 
+               'aggregate PGA auto-target', 
+               'global memory bound',
+               'total PGA allocated',
+               'extra bytes read/written');
+```
+<Callout type="warning">
+`extra bytes read/written` değeri yüksekse, PGA yetersizdir ve sıralama işlemleri diskteki TEMP tablespace'ini kullanıyordur. Bu ciddi yavaşlamaya neden olur.
+</Callout>
+
+---
+
+## Best Practices ve Limitler
+
+### 1. PGA_AGGREGATE_LIMIT (12c+)
+PGA kullanımının kontrolsüz artıp sunucu belleğini tüketmesini önlemek için bir üst limit koyun:
+```sql
+ALTER SYSTEM SET pga_aggregate_limit = 8G SCOPE = BOTH;
+```
+
+### 2. Linux HugePages Kullanımı
+Büyük SGA'ya sahip sistemlerde (32GB+), işletim sistemi seviyesinde **HugePages** yapılandırmak, bellek yönetim yükünü azaltır ve performansı artırır.
+
+### 3. AMM ve HugePages Çakışması
+<Callout type="danger">
+**Önemli:** Linux üzerinde AMM (`MEMORY_TARGET`) kullanıyorsanız HugePages kullanamazsınız. HugePages kullanmak istiyorsanız ASMM (`SGA_TARGET`) moduna geçmelisiniz.
+</Callout>
+
+### 4. Shared Pool Fragmentation
+Sık sık "ORA-04031: unable to allocate bytes of shared memory" hatası alıyorsanız, shared pool boyutunu artırmak yerine uygulama tarafında **Bind Variable** kullanımını teşvik edin.
+
+---
+
+## Özet: Adım Adım Bellek Optimizasyonu
+
+1.  **V$MEMORY_TARGET_ADVICE** ile genel bellek ihtiyacını belirleyin.
+2.  **V$PGA_TARGET_ADVICE** ile sıralama işlemleri için ideal PGA limitini saptayın.
+3.  **V$SGA_TARGET_ADVICE** (veya bileşenleri) ile buffer cache ve shared pool dengesini kurun.
+4.  Linux sunucularda 16GB ve üzeri bellekler için **HugePages** ve **ASMM** kombinasyonunu tercih edin.
+5.  Düzenli aralıklarla `v$memory_resize_ops` view'inden Oracle'ın sürekli bellek taşıyıp taşımadığını kontrol edin (Sık taşıma performans kaybı yaratır).
+
+Bu rehber ile Oracle veritabanınızın bellek mimarisini daha bilinçli yönetebilir ve performans darboğazlarını proaktif olarak engelleyebilirsiniz.

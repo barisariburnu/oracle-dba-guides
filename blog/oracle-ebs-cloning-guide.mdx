@@ -1,0 +1,73 @@
+---
+title: "Oracle E-Business Suite (EBS) Klonlama ve Bakım Adımları"
+description: "Oracle E-Business Suite (R12/12.2) uygulama ve veritabanı katmanlarının adpreclone ve adcfgclone araçları ile klonlanması süreci."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle EBS", "R12", "Cloning", "adcfgclone", "DBA", "ERP"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle E-Business Suite (EBS) Klonlama Rehberi
+
+**Oracle E-Business Suite (EBS)**, veritabanı ile uygulama katmanının (Apps) iç içe geçtiği karmaşık bir ERP sistemidir. Test veya geliştirme ortamı oluşturmak için canlı (Production) ortamın bir kopyasını oluşturma işlemine **Klonlama (Cloning)** denir. Standart veritabanı klonlamasından farklı olarak EBS klonlaması, uygulama dosyalarının ve servislerinin de doğru şekilde yapılandırılmasını gerektirir.
+
+
+<!--truncate-->
+Bu makalede, EBS R12 ortamlarında klonlama adımlarını inceleyeceğiz.
+
+## 1. Hazırlık (Source System - Pre-Clone)
+
+Klonlama işlemine başlamadan önce kaynak sistemde (Production) konfigürasyon dosyalarını hazırlamalıyız.
+
+```bash
+# Uygulama Katmanında (Run as applmgr)
+cd $ADMIN_SCRIPTS_HOME
+perl adpreclone.pl appstier
+
+# Veritabanı Katmanında (Run as oracle)
+cd $ORACLE_HOME/appsutil/scripts/$CONTEXT_NAME
+perl adpreclone.pl db_tier
+```
+Bu işlem, hedef sistemde kullanılacak olan ont-generic dosyaları oluşturur.
+
+---
+
+## 2. Kopyalama (Copying Files)
+
+Veritabanı (RMAN veya Cold Backup) ve Uygulama dizinlerini (`APPL_TOP`, `COMMON_TOP`, `Oracle Home`) hedef sunucuya kopyalayın.
+
+---
+
+## 3. Yapılandırma (Target System - Post-Clone)
+
+Dosyalar kopyalandıktan sonra hedef sistemde yapılandırma araçlarını çalıştırarak sunucu isimlerini, portları ve şifreleri güncelliyoruz.
+
+### Veritabanı Katmanı Yapılandırması:
+```bash
+cd $ORACLE_HOME/appsutil/clone/bin
+perl adcfgclone.pl dbTier
+```
+
+### Uygulama Katmanı Yapılandırması:
+```bash
+cd $COMMON_TOP/clone/bin
+perl adcfgclone.pl appsTier
+```
+İşlem sırasında size yeni sunucu adı, yeni DB ismi ve Instance adı gibi sorular sorulacaktır.
+
+---
+
+## 4. Klonlama Sonrası Adımlar (Post-Post Clone)
+
+Klonlama bittikten sonra sistemin düzgün çalışması için şu kontrolleri yapın:
+-   **Password Change:** `FNDCPASS` komutu ile APPS ve diğer sistem şifrelerini değiştirin.
+-   **Workflow/Mail:** Test ortamının yanlışlıkla canlıya mail atmaması için Workflow mailer konfigürasyonunu temizleyin veya durdurun.
+-   **Autoconfig:** Her şey bittikten sonra her iki katmanda da `adautocfg.sh` çalıştırarak konfigürasyonu doğrulayın.
+
+## Özet ve İpuçları
+
+-   **Log Dosyaları:** Klonlama sırasında bir hata alırsanız `$INST_TOP/admin/log/clone` dizinindeki log dosyalarını inceleyin.
+-   **Rapid Clone:** EBS 12.2 sürümüyle birlikte `adcfgclone` işlemleri bazı farklılıklar gösterse de temel mantık aynıdır.
+-   **Disk Alanı:** EBS uygulamaları çok büyüktür; klonlama öncesi hedef sunucuda yeterli disk alanı olduğundan emin olun.
+
+EBS klonlaması, bir ERP yöneticisinin en sık yaptığı işlerden biridir. Süreci otomatize etmek, hata payını azaltarak sistem sürekliliğini sağlar.

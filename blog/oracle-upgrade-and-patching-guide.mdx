@@ -1,0 +1,82 @@
+---
+title: "Oracle Yükseltme ve Yama Yönetimi: Upgrade ve Patching Rehberi"
+description: "Oracle veritabanı yükseltme (Upgrade) süreçleri, yama setleri (PSU, RU) ve OPatch aracı ile yama uygulama adımları."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Upgrade", "Patching", "OPatch", "PSU", "Database Maintenance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Yükseltme ve Yama Yönetimi
+
+Oracle veritabanlarında güvenlik açıklarını kapatmak, hataları gidermek ve yeni özelliklerden faydalanmak için düzenli yama (Patch) ve sürüm yükseltme (Upgrade) işlemleri hayati önem taşır. Ancak bu operasyonlar, veritabanı yöneticileri için en riskli süreçlerden biridir. Bu makalede, yama yönetimi ve yükseltme süreçlerindeki en iyi uygulamaları inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. OPatch Aracı ve Yama Uygulama
+
+Oracle yamaları genellikle `OPatch` aracı ile uygulanır. Bir yamayı uygulamadan önce en güncel OPatch sürümüne sahip olduğunuzdan emin olmalısınız.
+
+### Yama Öncesi Kontroller (Conflict Check)
+Yamanın mevcut yamalarla çakışıp çakışmadığını kontrol etmek için:
+
+```bash
+opatch prereq CheckConflictAgainstOHWithDetail -ph ./
+```
+
+### Yama Uygulama (Single Instance)
+```bash
+# Servisleri ve Listener'ı durdurun
+lsnrctl stop
+sqlplus / as sysdba
+shutdown immediate;
+exit;
+
+# Yamayı uygulayın
+opatch apply
+```
+
+---
+
+## 2. RAC Ortamında Rolling Patching
+
+RAC (Real Application Clusters) ortamının en büyük avantajı, yamaları servis kesintisi olmadan ("Rolling" yöntemiyle) uygulayabilmektir. Bu yöntemde her node sırayla kapatılır, yama yapılır ve tekrar açılır.
+
+```bash
+# Root kullanıcısı ile otomatik yama (192.168.1.101 ve sonrası)
+opatch auto <PATCH_DIRECTORY>
+```
+`opatch auto`, Grid Infrastructure ve RDBMS dizinlerine yamayı otomatik olarak uygular ve gerekli servisleri durdurup başlatır.
+
+---
+
+## 3. Database Upgrade: En İyi Uygulamalar
+
+Sürüm yükseltme (Örn: 11g -&gt; 12c veya 12c -&gt; 19c) öncesi hazırlık süreci, işlemin başarısını belirler.
+
+-   **Pre-Upgrade Information Tool:** Yükseltme öncesi `preupgrd.sql` veya `autoupgrade.jar` kullanarak sisteminizi analiz edin.
+-   **İstatistikleri Toplayın:** Yükseltme öncesinde sözlük (dictionary) istatistiklerini toplamak işlemi hızlandırır.
+    ```sql
+    EXEC DBMS_STATS.GATHER_DICTIONARY_STATS;
+    ```
+-   **Invalid Objeler:** Yükseltme öncesi ve sonrası `utlrp.sql` ile geçersiz objeleri derleyin.
+-   **Adaptive Log File Sync:** Bazı AIX sistemlerde yükseltme sonrası performans sorunlarını önlemek için `_use_adaptive_log_file_sync='FALSE'` parametresi gerekebilir.
+
+---
+
+## 4. Yama Sonrası Veritabanı Güncelleme (datapatch)
+
+RDBMS yazılım katmanına yama yaptıktan sonra, bu değişikliği veritabanı sözlüğüne (Data Dictionary) yansıtmanız gerekir. 12c ve sonrası sürümlerde bu işlem `datapatch` ile yapılır:
+
+```bash
+cd $ORACLE_HOME/OPatch
+./datapatch -verbose
+```
+
+## Özet ve Kritik Notlar
+
+-   **Yedekleme:** Herhangi bir yama veya yükseltme öncesi tam bir veritabanı yedeği (`RMAN Full Backup`) ve yazılım dizini yedeği (`tar/zip of $ORACLE_HOME`) almak zorunludur.
+-   **Release Notes:** Uygulayacağınız yamanın "Readme" dosyasını mutlaka satır satır okuyun; her yamaya özel manuel adımlar olabilir.
+-   **Orachk:** Sistem sağlığını ve yapılandırma hatalarını kontrol etmek için `orachk` (veya `exachk`) aracını periyodik olarak çalıştırın.
+
+Düzenli yama yönetimi, veritabanınızı siber saldırılara ve beklenmedik sistem hatalarına karşı koruyan en güçlü savunma hattıdır.

@@ -1,0 +1,85 @@
+---
+title: "Oracle Audit (Denetleme) Yönetimi: Konfigürasyon ve Otomatik Temizlik"
+description: "Oracle veritabanında denetleme (Audit) mekanizmalarının yapılandırılması, performansı korumak için denetim kayıtlarının otomatik temizlenmesi (Purge)."
+date: "2026-01-16"
+category: "Güvenlik"
+tags: ["Oracle Audit", "Security", "Audit Purge", "Compliance", "DBA", "Housekeeping"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Audit (Denetleme) Yönetimi ve Temizliği
+
+Kurumsal veritabanlarında "Kim, ne zaman, hangi veriyi değiştirdi?" sorusunun yanıtı **Audit** (Denetleme) kayıtlarındadır. Ancak denetleme açmak sadece bir başlangıçtır; asıl zorluk, biriken milyonlarca log kaydının veritabanını şişirmesini engellemek ve bu kayıtları düzenli olarak temizlemektir.
+
+
+<!--truncate-->
+Bu makalede, Oracle Audit konfigürasyonu ve otomatik temizlik (Purge) stratejilerini inceleyeceğiz.
+
+## 1. Audit Trail Yapılandırması
+
+Oracle'da standart denetleme, `AUDIT_TRAIL` parametresi ile yönetilir. Kayıtların veritabanında mı yoksa işletim sistemi seviyesinde mi tutulacağını belirler.
+
+```sql
+-- Audit aktifleştime (Genellikle DB seviyesinde tutulur)
+ALTER SYSTEM SET audit_trail = DB SCOPE=SPFILE;
+
+-- Hangi işlemlerin denetleneceğini belirleme
+AUDIT CREATE TABLE, DROP TABLE, ALTER TABLE;
+AUDIT SELECT ON HR.SALARIES BY ACCESS;
+```
+
+---
+
+## 2. Audit Kayıtlarını Sorgulama
+
+Gelen denetim raporu taleplerine yanıt vermek için `DBA_AUDIT_TRAIL` görünümü kullanılır:
+
+```sql
+SELECT username, timestamp, owner, obj_name, action_name, extended_timestamp
+FROM dba_audit_trail
+WHERE timestamp > sysdate - 1
+ORDER BY timestamp DESC;
+```
+
+---
+
+## 3. Otomatik Audit Temizliği (Purge)
+
+Audit tabloları (`SYS.AUD$`) default olarak `SYSTEM` tablespace'inde bulunur. Eğer temizlenmezse, bu tablespace dalar ve tüm veritabanı durur. Oracle 11g ve sonrası için `DBMS_AUDIT_MGMT` paketi ile temizlik otomatize edilmelidir.
+
+### Purge İşlemini Başlatma:
+```sql
+BEGIN
+  -- 1. Temizlik mekanizmasını initialize et
+  DBMS_AUDIT_MGMT.INIT_CLEANUP(
+    audit_trail_type         => DBMS_AUDIT_MGMT.AUDIT_TRAIL_ALL,
+    default_cleanup_interval => 24 -- Her 24 saatte bir
+  );
+
+  -- 2. Audit kayıtlarını başka bir tablespace'e taşı (Opsiyonel ama tavsiye edilir)
+  -- DBMS_AUDIT_MGMT.SET_AUDIT_TRAIL_LOCATION(...);
+
+  -- 3. Otomatik temizleme işi (Job) oluştur
+  DBMS_AUDIT_MGMT.CREATE_PURGE_JOB(
+    audit_trail_type           => DBMS_AUDIT_MGMT.AUDIT_TRAIL_ALL,
+    audit_trail_purge_interval => 24,
+    audit_trail_purge_name     => 'DAILY_AUDIT_PURGE',
+    use_last_arch_timestamp    => TRUE
+  );
+END;
+/
+```
+
+---
+
+## 4. Belirli Kullanıcıları Hariç Tutma (Exception Auditing)
+
+Bazen sistem kullanıcılarının veya toplu işlem yapan kullanıcıların loglanmasını (performans veya gereksizlik nedeniyle) istemeyebilirsiniz. Bu durumda geleneksel audit yerine **Fine-Grained Auditing (FGA)** veya login triggerları ile filtreleme yapabilirsiniz.
+
+## Özet ve En İyi Uygulamalar
+
+-   **Lokasyon:** Audit tablolarını mutlaka `SYSTEM` tablespace'inden çıkarıp, yedeklenmesi daha kolay olan ayrı bir tablespace'e taşıyın.
+-   **Denetim Kapsamı:** Her şeyi audit'lemek yerine sadece kritik tabloları ve yetkileri (örn: `GRANT ANY PRIVILEGE`) takip edin.
+-   **Security:** Audit kayıtlarının silinmesi yetkisini sadece çok kısıtlı bir gruba verin.
+
+Audit, veritabanının "kara kutusu"dur. Doğru yönetildiğinde hem güvenliği sağlar hem de sistem performansını korur.

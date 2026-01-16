@@ -1,0 +1,124 @@
+---
+title: "Oracle SQL Trace ve TKPROF ile Derinlemesine Sorgu Analizi"
+description: "Oracle veritabanında SQL Trace (10046) etkinleştirme, TKPROF raporlama, performans sorunlarını kök neden bazlı analiz etme ve session trace teknikleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle SQL Trace", "TKPROF", "10046 Event", "Performance Analysis", "Wait Events", "DBA Troubleshooting"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Trace ve TKPROF: Performans Analizinin Altın Anahtarı
+
+Oracle veritabanında bir sorgunun neden yavaş çalıştığını anlamanın en kesin yolu **SQL Trace** almaktır. Diğer yöntemler (Explain Plan, AWR, ASH) genellikle tahminlere veya örneklemelere dayanırken, SQL Trace bir sorgunun çalışması sırasında gerçekleşen her adımı (parse, execute, fetch), her okumayı ve her beklemeyi (wait event) satır satır kaydeder. Bu makalede, 10046 event kullanarak nasıl trace alacağınızı ve bu karmaşık log dosyalarını **TKPROF** ile nasıl okunabilir hale getireceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## SQL Trace (10046 Event) Seviyeleri
+
+10046 event, Oracle'ın genişletilmiş SQL trace mekanizmasıdır. Farklı detay seviyelerinde çalıştırılabilir:
+- **Level 1:** Standart SQL Trace (Zamanlamalar ve I/O).
+- **Level 4:** Level 1 + Bind Variable değerleri.
+- **Level 8:** Level 1 + Wait Event detayları.
+- **Level 12:** Level 1 + Bind Variables + Wait Events (En kapsamlısı).
+
+---
+
+## SQL Trace Nasıl Alınır?
+
+### 1. Mevcut Oturum (Session) İçin Trace Başlatma
+Hemen test etmek istediğiniz kendi oturumunuz için:
+
+```sql
+-- Trace dosyasına isim vererek bulmayı kolaylaştırın
+ALTER SESSION SET tracefile_identifier = 'SORGU_TEST_123';
+
+-- En yüksek seviyede trace başlat
+ALTER SESSION SET EVENTS '10046 trace name context forever, level 12';
+
+-- Sorgunuzu burada çalıştırın...
+SELECT * FROM orders WHERE status = 'PENDING';
+
+-- Trace kapat
+ALTER SESSION SET EVENTS '10046 trace name context off';
+```
+
+### 2. Başka Bir Kullanıcı Oturumu İçin Trace Başlatma
+Sisteme bağlı olan yavaş bir kullanıcıyı (SID ve Serial# üzerinden) izlemek için:
+
+```sql
+-- DBMS_MONITOR paketi ile (Modern Yöntem)
+EXEC DBMS_MONITOR.SESSION_TRACE_ENABLE(session_id => 660, serial_num => 2993, waits => TRUE, binds => TRUE);
+
+-- İşiniz bittiğinde kapatmayı unutmayın!
+EXEC DBMS_MONITOR.SESSION_TRACE_DISABLE(session_id => 660, serial_num => 2993);
+```
+
+---
+
+## Trace Dosyasını Bulma ve Analiz (TKPROF)
+
+Trace dosyaları sunucuda `.trc` uzantısıyla saklanır. Bu dosyalar ham halleriyle okunması zordur.
+
+### Trace Dosyasının Yerini Bulma
+```sql
+SELECT value FROM v$diag_info WHERE name = 'Default Trace File';
+```
+
+### TKPROF ile Rapor Oluşturma
+Sunucu terminalinde (SSH) şu komutu çalıştırarak okunabilir bir metin dosyası oluşturun:
+
+```bash
+# tkprof <girdi_dosyası.trc> <çıktı_dosyası.txt> sort=exeela,fchela
+tkprof ORCL_ora_12345_SORGU_TEST_123.trc analiz_raporu.txt sys=no
+```
+<Callout type="info">
+`sys=no` parametresi, raporun içine Oracle'ın arka planda yaptığı sistem sorgularını (recursive SQL) dahil etmez, sadece sizin sorgunuza odaklanır.
+</Callout>
+
+---
+
+## TKPROF Raporunu Yorumlama
+
+Oluşan raporda bir SQL için şu tabloyu göreceksiniz:
+
+| Call | Count | CPU | Elapsed | Disk | Query | Current | Rows |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Parse** | 1 | 0.01 | 0.02 | 0 | 0 | 0 | 0 |
+| **Execute** | 1 | 0.00 | 0.00 | 0 | 0 | 0 | 0 |
+| **Fetch** | 100 | 12.50 | 45.20 | 15000 | 25000 | 0 | 1000 |
+
+- **Elapsed &gt; CPU:** Aradaki fark "Wait Event" (Bekleme) süresidir. Örnekte 45sn - 12sn = 33sn sistem beklemiş.
+- **Disk:** Fiziksel okuma sayısı.
+- **Query:** Bellekten (Buffer Cache) okuma sayısı.
+
+---
+
+## Otomatik Trace Alma (Trigger Kullanımı)
+
+Belirli bir kullanıcı veritabanına bağlandığında otomatik trace başlatmak istiyorsanız:
+
+```sql
+CREATE OR REPLACE TRIGGER start_user_trace
+AFTER LOGON ON DATABASE
+BEGIN
+    IF USER = 'MUHASEBE_APP' THEN
+        EXECUTE IMMEDIATE 'ALTER SESSION SET tracefile_identifier = ''APP_TRACE''';
+        EXECUTE IMMEDIATE 'ALTER SESSION SET EVENTS ''10046 trace name context forever, level 12''';
+    END IF;
+END;
+/
+```
+<Callout type="danger">
+**Uyarı:** Logon trigger kullanımı risklidir. İşiniz bittiğinde mutlaka trigger'ı DROP edin veya pasife çekin, aksi halde disk alanınız hızla dolabilir.
+</Callout>
+
+---
+
+## Özet ve Best Practices
+
+1.  **Identifier Kullanın:** Trace dosyalarınızı bulmak için her zaman `tracefile_identifier` set edin.
+2.  **Level 12:** Sorun I/O veya kilitlenme ise mutlaka Level 12 (Waits) kullanın.
+3.  **Temizlik:** Trace dosyaları GB'larca yer kaplayabilir. Analiz sonrası sunucudan bu dosyaları silin.
+4.  **TKPROF Sıralaması:** Raporu oluştururken `sort` parametresini kullanarak en çok zaman alan (elapsed time) sorguları en üste getirin.
+
+SQL Trace ve TKPROF, Oracle performans tuning sürecinde "nokta atışı" teşhis koymanızı sağlar. Üstünkörü tahminler yerine gerçek verilerle konuşmanıza yardımcı olur.

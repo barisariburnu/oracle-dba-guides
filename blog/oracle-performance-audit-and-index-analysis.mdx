@@ -1,0 +1,74 @@
+---
+title: "Oracle Performans Denetimi: Primary Key Eksikliği ve İndeks Kullanım Analizi"
+description: "Oracle veritabanında Primary Key (Birincil Anahtar) olmayan tabloların tespiti, indekslerin hangi sorgular tarafından kullanıldığını analiz etme yöntemleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle", "Primary Key", "Index Usage", "Performance Audit", "DBA", "SQL Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Performans Denetimi: PK ve İndeks Analizi
+
+Veritabanı tasarımı, uygulama performansının temelidir. Tasarım aşamasında gözden kaçan eksiklikler (örn: Primary Key olmaması) veya yanlış kurgulanan indeksler, veri miktarı arttıkça ciddi darboğazlara neden olur. Bu makalede, veritabanı sağlığını denetlemek için kullanabileceğiniz kritik sorguları inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Primary Key (PK) Eksikliği Olan Tablolar
+
+Primary Key, bir tablodaki verilerin eşsizliğini sağlar ve çoğu zaman en önemli indeksi oluşturur. PK'sı olmayan tablolar hem veri tutarlılığını bozar hem de bazı replikasyon araçlarında (örn: GoldenGate) sorun yaratır.
+
+### PK Olmayan Tabloları Bulma:
+```sql
+SELECT owner || '.' || table_name as table_full_name
+FROM dba_tables dt
+WHERE owner IN ('APP_USER', 'DATA_OWNER') -- Sadece uygulama şemaları
+  AND table_name NOT IN (
+    SELECT table_name 
+    FROM dba_constraints 
+    WHERE owner = dt.owner 
+      AND constraint_type = 'P'
+  )
+ORDER BY 1;
+```
+
+---
+
+## 2. İndekslerin Hangi Sorgular Tarafından Kullanıldığını Bulma
+
+Bir indeksin gerçekten işe yarayıp yaramadığını anlamak için Execution Plan geçmişine (Cursor Cache) bakabiliriz. Bu sorgu, belirli bir tabloya veya indekse dokunan SQL_ID'leri listeler.
+
+```sql
+SELECT DISTINCT 
+    sql_id, 
+    object_owner, 
+    object_name, 
+    operation, 
+    options
+FROM v$sql_plan
+WHERE object_name = 'MUSTERI_INDEX_01' -- Buraya tablo veya indeks adını yazın
+  AND object_owner = 'CUSTOMER_SCHEMA';
+```
+*Not: Eğer bir indeks aylardır hiçbir planda görünmüyorsa, o indeksi silmeyi veya `INVISIBLE` yapmayı değerlendirebilirsiniz.*
+
+---
+
+## 3. İstatistik Takibi ve Kilitli İstatistikler
+
+Otomatik istatistik toplama sisteminin bazı tabloları atlamasına neden olan "Stats Lock" durumunu şu şekilde kontrol edebilirsiniz:
+
+```sql
+SELECT owner, table_name, stattype_locked
+FROM dba_tab_statistics
+WHERE stattype_locked IS NOT NULL;
+
+-- Kilidi açmak için:
+-- EXEC DBMS_STATS.UNLOCK_TABLE_STATS('OWNER', 'TABLE_NAME');
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Tasarım:** Her tablonun mutlaka bir Primary Key'i olmalıdır.
+-   **İndeks Sayısı:** Çok fazla indeks, `INSERT` ve `UPDATE` işlemlerini yavaşlatır. Sadece sorgularda kullanılan indeksleri tutun.
+-   **Gözlem:** İndeks kullanımını takip etmek için Oracle'ın "Index Usage Monitoring" özelliğini (`ALTER INDEX idx MONITORING USAGE`) de kullanabilirsiniz.
+
+Düzenli denetimler, veritabanınızın zamanla hantallaşmasını önler ve sürdürülebilir bir performans sağlar.

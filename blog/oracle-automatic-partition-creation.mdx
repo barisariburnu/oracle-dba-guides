@@ -1,0 +1,526 @@
+---
+title: "Oracle Otomatik Partition Oluşturma: Veritabanı Otomasyon Rehberi"
+description: "Oracle'da otomatik partition oluşturma, partition bakım otomasyonu, PMAX partition split teknikleri ve Job Scheduler yapılandırması."
+date: "2025-01-16"
+category: "Administration"
+tags: ["Partition Automation", "Partition Maintenance", "DBA Automation", "Scheduled Jobs", "Table Management"]
+author: "Oracle DBA"
+coverImage: "/images/placeholder.png"
+---
+
+# Oracle Otomatik Partition Oluşturma: Veritabanı Otomasyon Rehberi
+
+Oracle veritabanlarında milyarlarca satırlık devasa tabloları (Big Data) yönetmenin en etkili yolu Bölümleme (Partitioning) teknolojisidir. Ancak veriler büyüdükçe, her gün veya her ay yeni partisyonları manuel olarak oluşturmak veritabanı yöneticileri (DBA) için hem operasyonel bir yük hem de potansiyel bir hata kaynağı haline gelir. Eğer partisyon oluşturmayı unutursanız, uygulamanız veri girişi yapamaz ve sistem kesintiye uğrar.
+
+
+<!--truncate-->
+Bu makalede, Oracle tablolarınız için partisyon oluşturma işlemini nasıl %100 "Hands-Free" hale getirebileceğinizi öğreneceğiz. Gelişmiş PL/SQL prosedürleri, `PMAX` (Maxvalue) partisyon bölme (split) teknikleri ve Oracle Job Scheduler entegrasyonu ile tam otomatize bir bakım sistemi kuracağız.
+
+<Callout type="success">
+**Otomasyonun Gücü:** Bu rehber, partition yönetimini manuelden otomatiğe taşıyarak **human-error** riskini sıfıra indirir ve sistem sürekliliğini (Availability) garanti altına alır. Üretim sistemlerinde güvenle kullanabileceğiniz scriptleri içerir.
+</Callout>
+
+## Giriş: Otomatik Partition İhtiyacı
+
+Large volume tablolarda partition management, **manual error'lara** ve **downtime'lara** neden olabilir. Otomatik partition creation ile:
+
+- ✅ **Manual hatalar eliminat edilebilir**
+- ✅ **Scheduled jobs ile automation**
+- ✅ **Flexible partition strategies** (daily, weekly, monthly, quarterly, yearly)
+- ✅ **PMAX partition split support**
+- ✅ **Automatic index rebuild**
+
+## Setup: Partition Creation Schedule Table
+
+### 1. Schedule Table Oluşturma
+
+```sql
+-- Partition schedule table
+CREATE TABLE partition_create_schedule
+(
+  OWNER                  VARCHAR2(30),
+  TABLE_NAME             VARCHAR2(30),
+  PARTITION_UNIT         VARCHAR2(15),
+  NUM_PARTS_TO_CREATE    NUMBER(4)
+);
+
+-- Table comment
+COMMENT ON TABLE partition_create_schedule IS
+  'To record the tables for which partitions are to be added automatically';
+
+-- Column comments
+COMMENT ON COLUMN partition_create_schedule.OWNER IS
+  'The owner of the table';
+
+COMMENT ON COLUMN partition_create_schedule.TABLE_NAME IS
+  'The name of the table';
+
+COMMENT ON COLUMN partition_create_schedule.PARTITION_UNIT IS
+  'The partitioning scheme - MONTHLY/DAILY/WEEKLY/QUARTERLY/YEARLY';
+
+COMMENT ON COLUMN partition_create_schedule.NUM_PARTS_TO_CREATE IS
+  'The number of units to skip in creating the partition. For instance, if you want to
+   create the next partition 3 days from now for a DAILY unit, place 3 here';
+```
+
+### 2. Example Table Setup
+
+```sql
+-- Example partitioned table
+CREATE TABLE ptest4 (
+  bill_id     INTEGER PRIMARY KEY,
+  bill_date   DATE NOT NULL,
+  bill_total  NUMBER NOT NULL
+)
+PARTITION BY RANGE (bill_date)
+(
+  PARTITION histpart VALUES LESS THAN (TO_DATE('01-01-2014', 'DD-MM-YYYY')),
+  PARTITION y14m01d01 VALUES LESS THAN (TO_DATE('01-02-2014', 'DD-MM-YYYY')),
+  PARTITION y14m01d02 VALUES LESS THAN (TO_DATE('01-03-2014', 'DD-MM-YYYY')),
+  PARTITION y14m01d03 VALUES LESS THAN (TO_DATE('01-04-2014', 'DD-MM-YYYY')),
+  PARTITION y14m01d04 VALUES LESS THAN (TO_DATE('01-05-2014', 'DD-MM-YYYY')),
+  PARTITION y14m01d05 VALUES LESS THAN (TO_DATE('01-06-2014', 'DD-MM-YYYY'))
+);
+
+-- PMAX partition ekle (son partition)
+ALTER TABLE ptest4 ADD PARTITION pmax VALUES LESS THAN (MAXVALUE);
+```
+
+### 3. Schedule'a Table Ekleme
+
+```sql
+-- Truncate old schedule data
+TRUNCATE TABLE partition_create_schedule;
+
+-- Monthly partition creation
+INSERT INTO partition_create_schedule
+VALUES ('SYS', 'PTEST4', 'MONTHLY', 1);
+
+COMMIT;
+
+-- Diğer örnekler
+INSERT INTO partition_create_schedule
+VALUES ('AKAUDIT', 'MUHASEBE_DEGISIM_LOG_TABLE', 'MONTHLY', 1);
+
+COMMIT;
+```
+
+<Callout type="info">
+**NUM_PARTS_TO_CREATE Parametresi**
+- 1 = Bir sonraki partition'ı oluştur
+- 3 = 3 unit sonrası için partition oluştur (daily ise 3 gün sonra)
+- Bu parametre, future partition creation için esneklik sağlar
+</Callout>
+
+## Automatic Partition Creation Procedure
+
+### Complete Procedure Code
+
+```sql
+CREATE OR REPLACE PROCEDURE partition_create
+AS
+  CURSOR sched_cur IS
+    SELECT * FROM partition_create_schedule;
+
+  l_sched_rec              sched_cur%ROWTYPE;
+  l_cutoff_date            DATE;
+  l_hvc                    VARCHAR2(2000);
+  l_new_hvc                VARCHAR2(2000);
+  l_old_hvc                VARCHAR2(2000);
+  l_part_name              VARCHAR2(2000);
+  l_new_part_name          VARCHAR2(2000);
+  l_table_name             VARCHAR2(2000);
+  l_hv                     DATE;
+  l_new_hv                 DATE;
+  l_sql                    VARCHAR2(2000);
+  l_full                   VARCHAR2(32000);
+  l_ts                     VARCHAR2(2000);
+  l_errm                   VARCHAR2(2000);
+  l_mail_body              VARCHAR2(2000);
+  l_out                    VARCHAR2(2000);
+  l_recipients             VARCHAR2(2000) := 'dba@example.com';
+  l_place                  VARCHAR2(2);
+  l_exec_flag              VARCHAR2(4);
+
+  invalid_partition_unit   EXCEPTION;
+
+BEGIN
+  -- Setup output format
+  l_out := RPAD('Owner', 10) ||
+           RPAD('Table', 30) ||
+           RPAD('Part Unit', 10) ||
+           RPAD('Old HV', 11) ||
+           RPAD('New HV', 11) ||
+           RPAD('Exec', 4);
+
+  DBMS_OUTPUT.put_line(l_out);
+
+  l_out := RPAD('-', 9, '-') || ' ' ||
+           RPAD('-', 29, '-') || ' ' ||
+           RPAD('-', 9, '-') || ' ' ||
+           RPAD('-', 10, '-') || ' ' ||
+           RPAD('-', 10, '-') || ' ' ||
+           RPAD('-', 3, '-');
+
+  DBMS_OUTPUT.put_line(l_out);
+
+  OPEN sched_cur;
+
+  LOOP
+    FETCH sched_cur INTO l_sched_rec;
+    EXIT WHEN sched_cur%NOTFOUND;
+
+    -- Get current high value and tablespace
+    SELECT high_value, tablespace_name
+    INTO   l_old_hvc, l_ts
+    FROM   dba_tab_partitions tp
+    WHERE  partition_position = (
+             SELECT MAX(partition_position)
+             FROM   dba_tab_partitions
+             WHERE  table_name = tp.table_name
+             AND    table_owner = tp.table_owner
+           )
+    AND    table_name = l_sched_rec.table_name
+    AND    table_owner = l_sched_rec.owner;
+
+    -- Check if PMAX partition exists
+    IF (l_old_hvc = 'MAXVALUE') THEN
+      -- PMAX code - split the partition
+
+      -- Get partition before PMAX
+      SELECT high_value, tablespace_name
+      INTO   l_hvc, l_ts
+      FROM   dba_tab_partitions tp
+      WHERE  partition_position = (
+               SELECT MAX(partition_position) - 1
+               FROM   dba_tab_partitions
+               WHERE  table_name = tp.table_name
+               AND    table_owner = tp.table_owner
+             )
+      AND    table_name = l_sched_rec.table_name
+      AND    table_owner = l_sched_rec.owner;
+
+      EXECUTE IMMEDIATE 'select ' || l_hvc || ' from dual' INTO l_hv;
+      l_exec_flag := 'NO';
+
+      -- Calculate new partition values
+      CASE l_sched_rec.partition_unit
+        WHEN 'DAILY' THEN
+          l_new_hv := l_hv + l_sched_rec.num_parts_to_create;
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'M' || TO_CHAR(l_new_hv, 'MM') ||
+                            'D' || TO_CHAR(l_new_hv, 'DD');
+          l_exec_flag := 'YES';
+
+        WHEN 'WEEKLY' THEN
+          l_new_hv := l_hv + (7 * l_sched_rec.num_parts_to_create);
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'W' || TO_CHAR(l_new_hv, 'WW');
+          IF (TO_CHAR(SYSDATE, 'd') = '1') THEN
+            l_exec_flag := 'YES';
+          END IF;
+
+        WHEN 'MONTHLY' THEN
+          l_new_hv := ADD_MONTHS(l_hv, l_sched_rec.num_parts_to_create);
+          l_exec_flag := 'YES';
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'M' || TO_CHAR(l_new_hv, 'MM');
+
+        WHEN 'QUARTERLY' THEN
+          l_new_hv := ADD_MONTHS(l_hv, 3 * l_sched_rec.num_parts_to_create);
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'Q' || TO_CHAR(l_new_hv, 'Q');
+          IF (TO_CHAR(SYSDATE, 'mm/dd') IN ('01/01', '04/01', '07/01', '10/01')) THEN
+            l_exec_flag := 'YES';
+          END IF;
+
+        WHEN 'ANNUALLY' THEN
+          l_new_hv := ADD_MONTHS(l_hv, 12 * l_sched_rec.num_parts_to_create);
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY');
+          IF TO_CHAR(SYSDATE, 'mm/dd') = '01/01' THEN
+            l_exec_flag := 'YES';
+          END IF;
+
+        ELSE
+          RAISE invalid_partition_unit;
+      END CASE;
+
+      l_new_hvc := TO_CHAR(l_new_hv, 'dd/mm/yyyy');
+
+      -- Split partition SQL
+      l_sql := 'alter table ' || l_sched_rec.owner || '.' ||
+               l_sched_rec.table_name || ' split partition pmax ' ||
+               ' at (to_date(''' || l_new_hvc || ''',''dd/mm/yyyy''))' ||
+               ' into ( partition ' || l_new_part_name ||
+               ' tablespace ' || l_ts ||
+               ' initrans 11 storage (freelists 11 freelist groups 7)' ||
+               ' , partition pmax) update global indexes';
+
+    ELSE
+      -- Non-PMAX code - add partition
+      l_hvc := l_old_hvc;
+      EXECUTE IMMEDIATE 'select ' || l_hvc || ' from dual' INTO l_hv;
+      l_exec_flag := 'NO';
+
+      -- Calculate new partition values
+      CASE l_sched_rec.partition_unit
+        WHEN 'DAILY' THEN
+          l_new_hv := l_hv + l_sched_rec.num_parts_to_create;
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'M' || TO_CHAR(l_new_hv, 'MM') ||
+                            'D' || TO_CHAR(l_new_hv, 'DD');
+          l_exec_flag := 'YES';
+
+        WHEN 'WEEKLY' THEN
+          l_new_hv := l_hv + (7 * l_sched_rec.num_parts_to_create);
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'W' || TO_CHAR(l_new_hv, 'WW');
+          IF (TO_CHAR(SYSDATE, 'd') = '1') THEN
+            l_exec_flag := 'YES';
+          END IF;
+
+        WHEN 'MONTHLY' THEN
+          l_new_hv := ADD_MONTHS(l_hv, l_sched_rec.num_parts_to_create);
+          l_exec_flag := 'YES';
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'M' || TO_CHAR(l_new_hv, 'MM');
+
+        WHEN 'QUARTERLY' THEN
+          l_new_hv := ADD_MONTHS(l_hv, 3 * l_sched_rec.num_parts_to_create);
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY') ||
+                            'Q' || TO_CHAR(l_new_hv, 'Q');
+          IF (TO_CHAR(SYSDATE, 'mm/dd') IN ('01/01', '04/01', '07/01', '10/01')) THEN
+            l_exec_flag := 'YES';
+          END IF;
+
+        WHEN 'ANNUALLY' THEN
+          l_new_hv := ADD_MONTHS(l_hv, 12 * l_sched_rec.num_parts_to_create);
+          l_new_part_name := 'Y' || TO_CHAR(l_new_hv, 'YY');
+          IF TO_CHAR(SYSDATE, 'mm/dd') = '01/01' THEN
+            l_exec_flag := 'YES';
+          END IF;
+
+        ELSE
+          RAISE invalid_partition_unit;
+      END CASE;
+
+      l_new_hvc := TO_CHAR(l_new_hv, 'dd/mm/yyyy');
+
+      -- Add partition SQL
+      l_sql := 'alter table ' || l_sched_rec.owner || '.' ||
+               l_sched_rec.table_name || ' add partition ' ||
+               l_new_part_name || ' values less than ' ||
+               ' (to_date(''' || l_new_hvc || ''',''dd/mm/yyyy''))' ||
+               ' tablespace ' || l_ts ||
+               ' initrans 11 storage (freelists 11 freelist groups 7)';
+    END IF;
+
+    -- Output execution info
+    l_out := RPAD(l_sched_rec.owner, 10) ||
+             RPAD(l_sched_rec.table_name, 30) ||
+             RPAD(l_sched_rec.partition_unit, 10) ||
+             RPAD(TO_CHAR(l_hv, 'dd/mm/yyyy'), 11) ||
+             RPAD(l_new_hvc, 11) ||
+             RPAD(l_exec_flag, 4);
+
+    DBMS_OUTPUT.put_line(l_out);
+
+    IF (l_exec_flag = 'YES') THEN
+      DBMS_OUTPUT.put_line('l_new_part_name=' || l_new_part_name);
+      DBMS_OUTPUT.put_line('l_new_hvc=' || l_new_hvc);
+
+      l_mail_body := 'Statement Executed:' || l_sql;
+      DBMS_OUTPUT.put_line('l_mail_body=' || l_mail_body);
+
+      BEGIN
+        -- Execute partition creation
+        EXECUTE IMMEDIATE l_sql;
+        l_mail_body := l_mail_body || '...OK';
+
+      EXCEPTION
+        WHEN OTHERS THEN
+          l_errm := SQLERRM;
+          l_mail_body := l_mail_body || ' ERROR=' || l_errm;
+          RAISE;
+      END;
+
+      -- Rebuild unusable index partitions
+      FOR ind_cur IN (
+        SELECT index_owner, index_name, partition_name
+        FROM   dba_ind_partitions
+        WHERE  (index_owner, index_name) IN (
+                 SELECT owner, index_name
+                 FROM   dba_indexes
+                 WHERE  table_name = l_sched_rec.table_name
+                 AND    table_owner = l_sched_rec.owner
+               )
+        AND    status = 'UNUSABLE'
+      )
+      LOOP
+        DBMS_OUTPUT.put_line('Index Part=' || ind_cur.index_owner || '.' ||
+                            ind_cur.index_name || '.' ||
+                            ind_cur.partition_name);
+
+        l_sql := 'alter index ' || ind_cur.index_owner || '.' ||
+                 ind_cur.index_name || ' rebuild partition ' ||
+                 ind_cur.partition_name || ' nologging online';
+
+        l_mail_body := l_mail_body || CHR(12) || 'Statement Executed:' || l_sql;
+        DBMS_OUTPUT.put_line('l_mail_body=' || l_mail_body);
+
+        BEGIN
+          EXECUTE IMMEDIATE l_sql;
+          l_mail_body := l_mail_body || '...OK';
+
+        EXCEPTION
+          WHEN OTHERS THEN
+            l_errm := SQLERRM;
+            l_mail_body := l_mail_body || ' ERROR=' || l_errm;
+            RAISE;
+        END;
+      END LOOP;
+    END IF;
+
+  END LOOP;
+
+  CLOSE sched_cur;
+
+  DBMS_OUTPUT.put_line(l_full);
+
+EXCEPTION
+  WHEN OTHERS THEN
+    l_errm := SQLERRM;
+    raise_application_error(-20001, l_errm);
+END;
+/
+```
+
+<Callout type="warning">
+**PMAX Partition Handling**
+Procedure, PMAX (MAXVALUE) partition'ı otomatik olarak **split eder**. Bu, partition maintenance'i **sürekli ve automated** yapar.
+</Callout>
+
+## Scheduled Job Setup
+
+### 1. Oracle Job Scheduler ile
+
+```sql
+-- Daily job creation
+BEGIN
+  DBMS_SCHEDULER.CREATE_JOB(
+    job_name        => 'PARTITION_CREATE_JOB',
+    job_type        => 'STORED_PROCEDURE',
+    job_action      => 'partition_create',
+    start_date      => SYSTIMESTAMP,
+    repeat_interval => 'FREQ=DAILY; BYHOUR=02; BYMINUTE=00',
+    enabled         => TRUE,
+    comments        => 'Automatic partition creation job'
+  );
+END;
+/
+```
+
+### 2. Manual Execution
+
+```sql
+-- Manual test execution
+SET SERVEROUTPUT ON
+EXEC partition_create;
+```
+
+## Partition Naming Convention
+
+Procedure uses standard naming:
+
+| Unit | Format | Example |
+|------|--------|---------|
+| **Daily** | YYYMMD/DD | Y25M01D16 |
+| **Weekly** | YYWW | Y25W03 |
+| **Monthly** | YYMM | Y25M01 |
+| **Quarterly** | YYQ | Y25Q1 |
+| **Yearly** | YY | Y25 |
+
+## Monitoring and Troubleshooting
+
+### 1. Partition Status Check
+
+```sql
+-- Partition status monitoring
+SELECT table_owner,
+       table_name,
+       partition_name,
+       partition_position,
+       high_value,
+       tablespace_name,
+       num_rows
+FROM   dba_tab_partitions
+WHERE  table_name = 'PTEST4'
+ORDER BY partition_position;
+```
+
+### 2. Unusable Index Check
+
+```sql
+-- Unusable index partition kontrolü
+SELECT index_owner,
+       index_name,
+       partition_name,
+       status
+FROM   dba_ind_partitions
+WHERE  (index_owner, index_name) IN (
+         SELECT owner, index_name
+         FROM   dba_indexes
+         WHERE  table_name = 'YOUR_TABLE'
+       )
+AND    status = 'UNUSABLE';
+```
+
+### 3. Job Execution History
+
+```sql
+-- Job execution history
+SELECT job_name,
+       status,
+       actual_start_date,
+       run_duration,
+       error#,
+       additional_info
+FROM   dba_scheduler_job_run_details
+WHERE  job_name = 'PARTITION_CREATE_JOB'
+ORDER BY actual_start_date DESC;
+```
+
+## Best Practices
+
+### ✅ DO's
+
+1. **PMAX partition kullan**: Split operation için kolaylık sağlar
+2. **Initrans ve freelists ayarla**: High concurrency için önemli
+3. **Index rebuild et**: Procedure otomatik yapar ama manual check edin
+4. **Test environment**: Öncelikle test'te doğrulayın
+5. **Monitoring**: Regular partition status check yapın
+6. **Backup**: Partition operation öncesi backup alın
+
+### ❌ DON'Ts
+
+1. **Partition unit unutma**: Schedule table'a doğru unit girin
+2. **PMAX split ignore etme**: MAXVALUE partition'ı gerekli
+3. **Index monitoring skip etme**: UNUSABLE index'leri kontrol edin
+4. **Production test etmeden koyma**: Önce test environment'de deneyin
+5. **Documentation skip etme**: Schedule table'ı dokümante edin
+
+## Troubleshooting Checklist
+
+- [ ] Partition creation schedule table'da kayıt var mı?
+- [ ] PMAX partition mevcut mu?
+- [ ] NUM_PARTS_TO_CREATE parametresi doğru mu?
+- [ ] Tablespace yeterli boş alana sahip mi?
+- [ ] Index partition'ları UNUSABLE mi?
+- [ ] Job log'larında error var mı?
+- [ ] High value calculation doğru mu?
+- [ ] Partition naming convention consistent mi?
+
+<Callout type="success">
+**Özet**
+Bu automated partition creation procedure, manual partition management'i **eliminate eder** ve **zero-downtime** maintenance sağlar. Flexible scheduling ve automatic index rebuild ile production-ready çözümdür.
+</Callout>

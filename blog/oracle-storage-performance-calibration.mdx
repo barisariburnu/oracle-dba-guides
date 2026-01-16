@@ -1,0 +1,75 @@
+---
+title: "Oracle Depolama Performansı: CALIBRATE_IO ile I/O Ölçümü"
+description: "Oracle veritabanında depolama alt sisteminin performansını (IOPS ve MBPS) ölçmek için DBMS_RESOURCE_MANAGER.CALIBRATE_IO kullanımı."
+date: "2026-01-16"
+category: "Tanılama"
+tags: ["Oracle", "Storage", "IOPS", "DBMS_RESOURCE_MANAGER", "Performance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Depolama Performansı: CALIBRATE_IO Kurulumu
+
+Veritabanı performansının en büyük darboğazı genellikle depolama (storage) katmanıdır. Oracle, depolama alt sisteminin gerçek maksimum IOPS (saniyedeki giriş/çıkış sayısı) ve MBPS (saniyedeki megabayt aktarımı) kapasitesini ölçmek için `DBMS_RESOURCE_MANAGER.CALIBRATE_IO` paketini sunar. Bu araç, veritabanı üzerinden yapay bir yük oluşturarak disklerin gerçek kapasitesini test eder.
+
+
+<!--truncate-->
+Bu makalede, I/O kalibrasyonunun nasıl yapılacağını ve sonuçların nasıl yorumlanacağını göreceğiz.
+
+## 1. Hazırlık ve Gereksinimler
+
+Kalibrasyon işlemini başlatmadan önce şu şartların sağlandığından emin olun:
+-   Veritabanı `OPEN` modunda olmalıdır.
+-   ASM (Automatic Storage Management) kullanılıyorsa daha doğru sonuçlar alınır.
+-   İşlem sırasında veritabanında başka yoğun iş yükü olmamalıdır (Sonuçlar sapabilir).
+-   `FILESYSTEMIO_OPTIONS` parametresi `SETALL` veya `ASYNCH` olmalıdır.
+
+---
+
+## 2. Kalibrasyonu Başlatma
+
+İşlemi başlatırken, sistemdeki **fiziksel disk sayısını** ve kabul edilebilir **maksimum latency** (gecikme) süresini belirtmeniz gerekir.
+
+```sql
+SET SERVEROUTPUT ON
+DECLARE
+  l_max_iops       INTEGER;
+  l_max_mbps       INTEGER;
+  l_actual_latency INTEGER;
+BEGIN
+  -- Parametreler: 
+  -- num_physical_disks: 10 (Örnek disk sayısı)
+  -- max_latency: 20 (ms cinsinden maximum gecikme toleransı)
+  
+  DBMS_RESOURCE_MANAGER.CALIBRATE_IO (
+    num_physical_disks => 10, 
+    max_latency        => 20,
+    max_iops           => l_max_iops,
+    max_mbps           => l_max_mbps,
+    actual_latency     => l_actual_latency
+  );
+
+  DBMS_OUTPUT.PUT_LINE('Maksimum IOPS: ' || l_max_iops);
+  DBMS_OUTPUT.PUT_LINE('Maksimum MBPS: ' || l_max_mbps);
+  DBMS_OUTPUT.PUT_LINE('Ölçülen Gecikme (Latency): ' || l_actual_latency);
+END;
+/
+```
+
+---
+
+## 3. Sonuçları Görüntüleme
+
+Kalibrasyon bittikten sonra sonuçları `V$IO_CALIBRATION_STATUS` görünümünden takip edebilirsiniz:
+
+```sql
+SELECT status, calibration_time, max_iops, max_mbps, actual_latency
+FROM v$io_calibration_status;
+```
+
+## Özet ve Kritik Notlar
+
+-   **I/O Sorunlarını Tespit Etme:** Eğer ölçülen IOPS veya MBPS değerleri, depolama üreticinizin taahhüt ettiği rakamların çok altındaysa, donanım seviyesinde (Kablolama, Switch, Disk arızası) bir sorun olabilir.
+-   **Resource Manager Bağlantısı:** Kalibrasyon sonuçları, Oracle Resource Manager tarafından otomatik olarak kullanılır. Oracle, sistemin kapasitesini bilerek iş yüklerini (paralellik derecesi vb.) buna göre optimize eder.
+-   **Uyarı:** Bu işlem diskler üzerinde yoğun bir yük oluşturur. Kesinlikle canlı sistemin en yoğun anında çalıştırılmamalıdır!
+
+Depolama kapasitenizi sayısal verilerle bilmek, performans sorunlarını "hislerle" değil, rakamlarla çözmenizi sağlar.

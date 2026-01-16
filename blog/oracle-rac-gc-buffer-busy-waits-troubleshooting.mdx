@@ -1,0 +1,81 @@
+---
+title: "Oracle RAC: gc buffer busy waits Sorunlarını Giderme"
+description: "Oracle RAC (Real Application Clusters) ortamında gc buffer busy waits bekleme olaylarını analiz etme, sıcak blokları (hot blocks) tespit etme ve çözüm yöntemleri."
+date: "2026-01-16"
+category: "RAC"
+tags: ["Oracle RAC", "GC Buffer Busy Waits", "Wait Events", "Hot Blocks", "Cluster Tuning", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RAC: gc buffer busy waits Sorunlarını Giderme
+
+Oracle RAC ortamında en sık karşılaşılan performans sorunlarından biri **gc buffer busy waits** bekleme olayıdır. Bu durum, bir instance'ın (Node) bir veri bloğuna erişmek istediği sırada, aynı bloğun başka bir instance tarafından kullanılıyor (kilitli veya transfer ediliyor) olması nedeniyle beklemesi durumudur. Basitçe ifade etmek gerekirse, cluster ortamındaki "Hot Block" (Sıcak Blok) problemidir. Bu makalede, bu beklemenin kök nedenlerini nasıl bulacağınızı adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## gc buffer busy waits Neden Oluşur?
+
+RAC mimarisinde bloklar instance'lar arasında Interconnect (özel ağ) üzerinden taşınır. Eğer birden fazla node aynı tablo satırlarını (veya aynı index bloğunu) çok yoğun şekilde güncellemeye çalışırsa, blok sürekli node'lar arasında gidip gelmeye başlar ve "Global Cache" bekleme süreleri artar.
+
+---
+
+## Adım 1: Sorunlu Zaman Aralığını ve Event'i Tespit Etme
+
+İlk olarak, AWR verilerini kullanarak wait event'in yoğunlaştığı snapshot aralığını bulmalısınız:
+
+```sql
+SELECT event, 
+       COUNT(*) AS wait_count
+FROM dba_hist_active_sess_history
+WHERE snap_id BETWEEN :start_snap AND :end_snap
+  AND wait_class = 'Cluster'
+GROUP BY event
+ORDER BY wait_count DESC;
+```
+
+---
+
+## Adım 2: Beklemeye Neden Olan SQL ve Nesneyi (Object) Bulma
+
+Hangi SQL sorgusunun bu cluster beklemelerine neden olduğunu ve hangi nesne (Tablo/Index) üzerinde çekişme yaşandığını saptamak için:
+
+```sql
+SELECT sql_id, 
+       current_obj# AS object_id, 
+       COUNT(*) AS cnt
+FROM dba_hist_active_sess_history
+WHERE snap_id BETWEEN :start_snap AND :end_snap
+  AND event = 'gc buffer busy waits'
+GROUP BY sql_id, current_obj#
+HAVING COUNT(*) > 10
+ORDER BY cnt DESC;
+```
+
+Ardından, `object_id` değerini kullanarak gerçek nesne adını bulun:
+
+```sql
+SELECT owner, object_name, object_type 
+FROM dba_objects 
+WHERE object_id = :found_object_id;
+```
+
+---
+
+## Adım 3: Çözüm Stratejileri
+
+Problemi tespit ettikten sonra şu yöntemlerden birini uygulayabilirsiniz:
+
+1.  **Partitioning:** Eğer sorun bir tabloda ise, tabloyu hash partition'lara bölmek, verilerin fiziksel olarak farklı bloklara dağılmasını sağlar ve node'lar arası çekişmeyi (contention) azaltır.
+2.  **Sequence Optimization:** Eğer çekişme bir index üzerindeyse ve bu index bir sequence üzerinden besleniyorsa, sequence'in `CACHE` değerini artırmak (örn: 20'den 1000'e) veya sequence'i `NOORDER` yapmak cluster trafiğini azaltır.
+3.  **Application Routing:** Mümkünse, aynı veriye erişen kullanıcıları her zaman aynı instance'a yönlendirin. Böylece blok node'lar arasında taşınmak zorunda kalmaz.
+4.  **Index Rebuild (Reverse Key):** Eğer index leaf block'larında yoğun çekişme varsa, indexi `REVERSE` tipine dönüştürmek, ardışık değerlerin farklı bloklara yazılmasını sağlar.
+
+---
+
+## Özet ve En İyi Uygulamalar
+
+-   **Interconnect Performansı:** Cluster bekleme süreleriniz çok yüksekse, sadece SQL'i değil, fiziksel Interconnect ağınızın (Private Network) bant genişliğini ve gecikme (latency) sürelerini de kontrol edin.
+-   **Zamanında Müdahale:** `gc buffer busy waits` sorunu bir node'da başlar ve domino etkisiyle tüm cluster'ın performansını çökertebilir. ASH raporları ile "Hot Objects" listesini düzenli takip edin.
+-   **İstatistikler:** Tablo istatistiklerinin (özellikle `num_rows` ve `blocks`) güncelliği, CBO'nun doğru plan seçmesini ve gereksiz full scan/join trafiğini önlemesini sağlar.
+
+RAC sistemleri yüksek ölçeklenebilirlik sunar ama "sıcak blok" yönetimi yapılmazsa tam tersi bir performans kaybı yaşatabilir. Doğru analizle bu darboğazları hızlıca aşabilirsiniz.

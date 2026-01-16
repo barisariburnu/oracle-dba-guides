@@ -1,0 +1,110 @@
+---
+title: "Oracle Veritabanı Boyut ve SYSAUX Segment Analizi"
+description: "Veritabanı toplam boyutu, Fast Recovery Area (FRA) kullanımı ve SYSAUX tablespace içindeki büyük segmentlerin analizi için SQL scriptleri."
+date: 2026-01-16
+category: "Oracle Yönetim"
+tags: ["oracle", "database size", "sysaux", "fra", "segments", "storage", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Boyut ve SYSAUX Segment Analizi
+
+Oracle veritabanı yöneticileri için depolama alanını izlemek ve kontrol altında tutmak kritik bir görevdir. Özellikle veritabanı toplam boyutu, Fast Recovery Area (FRA) doluluk oranı ve SYSAUX tablespace'in kontrolsüz büyümesi sık karşılaşılan sorunlardır. Bu makalede, bu metrikleri izlemek için kullanılan temel scriptleri inceleyeceğiz.
+
+
+<!--truncate-->
+## Veritabanı Toplam Boyutu
+
+Veritabanındaki tüm segmentlerin toplam boyutunu (data binaları, indexler, rollback segmentleri vb.) görmek için `DBA_SEGMENTS` view'ini kullanabiliriz.
+
+### SQL Sorgusu: Veritabanı Boyutu
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT SUM(bytes / (1024 * 1024)) "DB Size in MB",
+       ROUND(SUM(bytes / (1024 * 1024 * 1024)), 2) "DB Size in GB"
+FROM dba_segments;
+```
+
+<Callout type="info" title="Bilgi">
+Bu sorgu sadece mevcut data miktarını gösterir. Tablespace'lerdeki boş alanlar bu toplama dahil değildir. Toplam disk kullanımını görmek için `DBA_DATA_FILES` view'ini kullanmalısınız.
+</Callout>
+
+## Fast Recovery Area (FRA) İzleme
+
+Recovery işlemleri için kullanılan FRA alanının dolması, veritabanının durmasına (hang) neden olabilir. Bu nedenle FRA doluluk oranını düzenli olarak izlemek gerekir.
+
+### SQL Sorgusu: FRA Durumu
+
+```sql
+set pagesize 1000 line 200
+col "db_recovery_file_dest" for a32;
+col toplam_mb for 999,999,999;
+col dolu_mb for 999,999,999;
+col yuzde for 999;
+
+SELECT name "db_recovery_file_dest",
+       CEIL(space_limit / 1024 / 1024) ToplamMB,
+       CEIL(space_used / 1024 / 1024) DoluMB,
+       DECODE(NVL(space_used, 0), 0, 0, CEIL((space_used / space_limit) * 100)) Yuzde
+FROM v$recovery_file_dest
+ORDER BY 1;
+```
+
+## SYSAUX Tablespace Analizi
+
+SYSAUX tablespace, Oracle'ın dahili araçları (AWR, Optimizer Stats, Enterprise Manager vb.) tarafından kullanılır. Özellikle optimizer istatistik geçmişi temizlenmezse SYSAUX aşırı büyüyebilir.
+
+### SYSAUX Kritik Segment Analizi
+
+Aşağıdaki sorgu, optimizer istatistiklerinin tutulduğu en büyük iki segmentin boyutunu gösterir:
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT segment_name,
+       ROUND(bytes / (1024 * 1024), 2) "Size in MB"
+FROM dba_segments
+WHERE tablespace_name = 'SYSAUX'
+  AND segment_name IN ('WRI$_OPTSTAT_HISTHEAD_HISTORY', 'WRI$_OPTSTAT_HISTGRM_HISTORY')
+ORDER BY bytes DESC;
+```
+
+<Callout type="warning" title="SYSAUX Büyüme Sorunu">
+Eğer bu segmentler GB'larca yer kaplıyorsa, istatistik saklama süresini (retention) düşürmeniz veya manuel temizlik yapmanız gerekebilir. `DBMS_STATS.PURGE_STATS` prosedürü bu işlem için kullanılabilir.
+</Callout>
+
+## Veritabanı Log Modu ve Platform Bilgisi
+
+Veritabanının ARCHIVELOG modunda olup olmadığını ve üzerinde çalıştığı platformu hızlıca kontrol etmek için:
+
+```sql
+set line 2000
+set pagesize 2000
+
+SELECT name,
+       db_unique_name,
+       platform_name,
+       log_mode
+FROM v$database;
+```
+
+## Örnek Kullanım Senaryosu
+
+Bu scriptler genellikle günlük health check süreçlerinde birleştirilerek kullanılır. Örneğin, SYSAUX alanındaki bir doluluk optimizer istatistiklerinin toplanmasını engelleyebilir, bu da SQL performanslarının düşmesine neden olabilir.
+
+### Özet Rapor Çıktısı
+
+| Metrik | Durum | Aksiyon |
+|--------|-------|---------|
+| DB Size | 500 GB | Planlanan büyüme dahilinde |
+| FRA Usage | %85 | **Kritik!** Arşivleri yedekle ve sil |
+| SYSAUX (Hist) | 40 GB | İstatistik retention süresini kontrol et |
+| Log Mode | ARCHIVELOG | Normal |
+
+## Sonuç
+
+Veritabanı sağlığı için sadece uptime yeterli değildir. Depolama alanlarının (Data, FRA, SYSAUX) proaktif olarak izlenmesi, olası kesintilerin önüne geçer. SYSAUX analizi ise özellikle karmaşık performans sorunlarını önlemek için DBA checklistlerinde mutlaka bulunmalıdır.

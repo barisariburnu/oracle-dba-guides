@@ -1,0 +1,84 @@
+---
+title: "Oracle GoldenGate Tablo Bazlı Replikasyon ve Veri Dönüştürme (Colmap)"
+description: "Oracle GoldenGate üzerinde belirli tabloları replike etme, COLMAP kullanımı ile kolon bazlı veri manipülasyonu ve özel fonksiyonlar (STRCAT, IF, CASE) ile veri zenginleştirme."
+date: "2026-01-16"
+category: "GoldenGate"
+tags: ["Oracle GoldenGate", "COLMAP", "Data Transformation", "Replication", "Mapping", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle GoldenGate Tablo Bazlı Replikasyon ve Veri Dönüştürme
+
+Oracle **GoldenGate**, sadece veriyi bir noktadan diğerine kopyalamakla kalmaz, aynı zamanda veriyi "yolda" değiştirmenize, zenginleştirmenize veya filtrelemenize olanak tanır. Replicat parametre dosyasında kullanılan `MAP` ve `COLMAP` ifadeleri, kaynak ve hedef tablolar arasındaki kolon eşleşmelerini ve veri dönüşümlerini yöneten en kritik araçlardır. Bu makalede, gerçek dünyadan alınmış bir "Hukuk Uygulaması" replikasyon örneği üzerinden veri dönüştürme tekniklerini inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Basit Tablo Mapping (Eşleme)
+
+En basit haliyle, bir şemadaki tüm tabloları hedef şemaya birebir eşlemek için:
+
+```bash
+-- Replicat Parametre Dosyası
+MAP HUKUK.*, TARGET HUKUK.*;
+```
+
+---
+
+## 2. COLMAP ile Gelişmiş Veri Dönüştürme
+
+Eğer hedef tablonuzda kaynaktan farklı kolonlar varsa veya veriyi birleştirmeniz gerekiyorsa `COLMAP` kullanılır.
+
+### A. Kolon Birleştirme (STRCAT)
+Örneğin; `ADI` ve `SOYADI` kolonlarını hedefte tek bir `AD_SOYAD` kolonunda toplamak:
+
+```bash
+MAP HUKUK.KISILER, TARGET HUKUK.KISILER, 
+COLMAP (USEDEFAULTS, 
+        AD_SOYAD = @STRCAT(ADI, " ", SOYADI));
+```
+
+### B. Koşullu Veri Atama (IF / CASE)
+Belirli bir şarta göre kolon değerini değiştirmek için `@IF` veya `@CASE` fonksiyonları kullanılır:
+
+```bash
+MAP HUKUK.DOSYALAR, TARGET HUKUK.DOSYALAR, 
+COLMAP (USEDEFAULTS, 
+        DOSYA_TIPI_ACIKLAMA = @CASE (DOSYA_TIPI, 
+                                     0, "LEHE", 
+                                     1, "ALEYHE", 
+                                     "BILINMIYOR"));
+```
+
+### C. Sistem Değişkenleri ve Zaman Damgası
+Her satırın hedefte ne zaman commit edildiğini takip etmek için GoldenGate header bilgilerini kullanabilirsiniz:
+
+```bash
+MAP HUKUK.HAREKETLER, TARGET HUKUK.HAREKETLER, 
+COLMAP (USEDEFAULTS, 
+        HEDEF_COMMIT_DATE = @GETENV ("GGHEADER", "COMMITTIMESTAMP"));
+```
+
+---
+
+## 3. HANDLECOLLISIONS Parametresi
+
+Initial Load (ilk veri yükleme) sırasında kaynakta veri değişmeye devam ediyorsa, "duplicate key" veya "row not found" hatalarını önlemek için `HANDLECOLLISIONS` geçici olarak aktif edilir.
+
+```bash
+-- Replicat Parametresi
+HANDLECOLLISIONS
+MAP HUKUK.*, TARGET HUKUK.*;
+```
+<Callout type="warning">
+`HANDLECOLLISIONS` sadece initial load bitene kadar kullanılmalıdır. Sonrasında mutlaka kapatılmalıdır, aksi halde veri tutarsızlıklarını maskeleyebilir.
+</Callout>
+
+---
+
+## Özet ve İpuçları
+
+-   **USEDEFAULTS:** İsmi aynı olan diğer tüm kolonların otomatik eşleşmesini sağlar. Bu ifadeyi `COLMAP` başında kullanmak sizi tek tek kolon yazmaktan kurtarır.
+-   **Date Dönüşümleri:** `@DATE` fonksiyonu ile farklı formattaki tarihleri (YYYYMMDD -&gt; DD-MM-YYYY gibi) kolayca normalize edebilirsiniz.
+-   **Performance:** Çok karmaşık `COLMAP` fonksiyonları Replicat sürecini yavaşlatabilir. Mümkünse ağır dönüşümleri hedef veritabanında (View veya Trigger ile) yapmayı değerlendirin.
+
+GoldenGate'in bu esnek yapısı, onu sadece bir replikasyon aracı değil, aynı zamanda gerçek zamanlı bir ETL (Extract, Transform, Load) aracı haline getirir.

@@ -1,0 +1,385 @@
+---
+title: "Oracle Exadata Cell Disk Monitoring: Donanım Sağlığı ve Disk Değişim Rehberi"
+description: "Oracle Exadata Storage Cell disk monitoring, predictive failure detection, CellCLI komutları ve online disk değişim prosedürleri."
+date: "2025-01-16"
+category: "Exadata"
+tags: ["Exadata", "Cell Disk", "Storage Monitoring", "Disk Replacement", "CellCLI", "ASM"]
+author: "Oracle DBA"
+coverImage: "/images/placeholder.png"
+---
+
+# Oracle Exadata Cell Disk Monitoring: Donanım Sağlığı ve Disk Değişim Rehberi
+
+Oracle Exadata, dünyanın en güçlü veritabanı platformu olmasını akıllı depolama (Storage Cell) katmanına borçludur. Bu katmandaki Cell Disk'lerin sağlığı, sadece veri güvenliği için değil, aynı zamanda Smart Scan ve Offloading gibi kritik Exadata özelliklerinin performansı için de belirleyicidir. Exadata yönetimi yapan bir DBA için disk arızalarını gerçekleşmeden önce tespit etmek (Predictive Failure) ve sistem açıkken (Online) disk değişim prosedürlerini hatasız uygulamak en kritik yetkinliklerden biridir.
+
+
+<!--truncate-->
+Bu makalede, CellCLI ve ASM araçlarını kullanarak Exadata disk ekosistemini nasıl izleyeceğinizi, uyarı veren diskleri nasıl teşhis edeceğinizi ve fiziksel disk değişim sürecini adım adım nasıl yöneteceğinizi öğreneceğiz.
+
+<Callout type="warning">
+**Önemli Not:** Exadata disk arızaları, ASM Redundancy (Normal/High) sayesinde veri kaybına neden olmaz; ancak bir arıza oluştuğunda performans düşer ve sistem risk altına girer. Proaktif izleme bu riskleri minimize eder.
+</Callout>
+
+## Exadata Cell Disk Monitoring Overview
+
+Exadata storage cells (cell server), physical disk'leri monitoring ve yönetmek için **CellCLI** utility'sini kullanır. Proactive monitoring ile:
+
+- ✅ **Predictive failure detection**
+- ✅ **Automated alerting**
+- ✅ **Zero data loss**
+- ✅ **Minimal downtime**
+- ✅ **Graceful disk replacement**
+
+## CellCLI ile Physical Disk Monitoring
+
+### 1. Tüm Physical Disk'leri Listele
+
+```bash
+# Cell server'da physical disk'leri listele
+cellcli -e list physicaldisk detail
+```
+
+**Output Example**:
+```
+name:                   28:0
+deviceId:               16
+diskType:               HardDisk
+enclosureDeviceId:      28
+errMediaCount:          0
+errOtherCount:          0
+foreignState:           false
+luns:                   0_0
+makeModel:              "SEAGATE ST360057SSUN600G"
+physicalFirmware:       0B25
+physicalInsertTime:     2012-11-25T22:31:27+02:00
+physicalInterface:      sas
+physicalSerial:         E0JB7M
+physicalSize:           558.9109999993816G
+slotNumber:             0
+status:                 normal
+```
+
+<Callout type="info">
+**Critical Fields**:
+- `status`: **normal** veya **warning** olmalı
+- `errMediaCount`: Media error count (0 ideal)
+- `errOtherCount`: Other error count (0 ideal)
+- `physicalSerial`: Disk replacement için gerekli
+</Callout>
+
+### 2. Warning Durumundaki Disk'i Bul
+
+```bash
+# Sadece warning durumundaki disk'leri listele
+cellcli -e list physicaldisk where status != 'normal' detail
+```
+
+**Predictive Failure Example**:
+```
+name:                   28:4
+deviceId:               20
+diskType:               HardDisk
+enclosureDeviceId:      28
+errMediaCount:          3955
+errOtherCount:          0
+foreignState:           false
+luns:                   0_4
+makeModel:              "SEAGATE ST360057SSUN600G"
+physicalFirmware:       0B25
+physicalInsertTime:     2012-11-25T22:31:43+02:00
+physicalInterface:      sas
+physicalSerial:         E0K6B8
+physicalSize:           558.9109999993816G
+slotNumber:             4
+status:                 warning - predictive failure
+```
+
+<Callout type="warning">
+**⚠️ Predictive Failure Uyarısı**
+`errMediaCount` değerinin artması ve `status: warning - predictive failure` görülmesi, **disk'in yakında fail olacağını** gösterir. Immediate action gerekli!
+</Callout>
+
+### 3. Grid Disk Status Monitoring
+
+```bash
+# Grid disk status kontrolü
+cellcli -e list griddisk attributes name,asmmodestatus,asmdeactivationoutcome
+```
+
+**Output Example**:
+```
+DATA_DM01_orcl_dbf01cel02       ONLINE          Yes
+DATA_DM01_orcl_dbf01cel02       ONLINE          Yes
+DATA_DM01_orcl_dbf01cel02       ONLINE          Yes
+DATA_DM01_orcl_dbf01cel02       ONLINE          Yes
+DATA_DM01_orcl_dbf01cel02       DROPPED         Yes    ⚠️
+DATA_DM01_orcl_dbf01cel02       ONLINE          Yes
+```
+
+## ASM Disk Monitoring
+
+### 1. ASM Diskgroup Status
+
+```sql
+-- ASM instance'a connect
+sqlplus / as sysasm
+
+-- Diskgroup'taki disk'leri kontrol et
+SELECT count(*),
+       failgroup
+FROM   gv$asm_disk
+GROUP BY failgroup;
+```
+
+**Expected Output**:
+```
+  COUNT(*) FAILGROUP
+---------- ------------------------------
+        68 DM01CEL03
+        68 DM01CEL01
+        68 DM01CEL02
+```
+
+### 2. ASM Disk Mount Status
+
+```sql
+-- Disklerin mount durumunu görüntüle
+SELECT name,
+       substr(path, 1, 50),
+       mount_status,
+       header_status,
+       state
+FROM   gv$asm_disk;
+```
+
+**Output (Problemli Disk)**:
+```
+NAME                                                MOUNT_S  HEADER_STATU  STATE
+o/10.0.1.X/RECO_DM01_orcl_dbf01cel02               CLOSED   FORMER        NORMAL ⚠️
+o/10.0.1.X/DBFS_DG_orcl_dbf01cel02                 CLOSED   FORMER        NORMAL ⚠️
+o/10.0.1.X/DATA_DM01_orcl_dbf01cel02               CLOSED   FORMER        NORMAL ⚠️
+```
+
+<Callout type="danger">
+**CRITICAL: CLOSED/FORMER Status**
+`CLOSED` ve `FORMER` status'u, disk'in **ASM tarafından drop edildiğini** gösterir. Immediate action gerekli!
+</Callout>
+
+### 3. ASM Disk State Detail
+
+```sql
+-- Detaylı ASM disk durumu
+SELECT name,
+       state,
+       mount_date,
+       mount_status,
+       create_date,
+       total_mb,
+       free_mb
+FROM   v$asm_disk_stat
+ORDER BY name;
+```
+
+### 4. ASM Rebalance Operation Monitor
+
+```sql
+-- Rebalance operation kontrolü
+SELECT *
+FROM   gv$asm_operation;
+
+-- Rebalance progress
+SELECT group_name,
+       operation,
+       state,
+       power,
+       est_minutes,
+       sofar,
+       total_work
+FROM   v$asm_operation;
+```
+
+<Callout type="info">
+**Rebalance Power**
+`asm_power_limit` parametresi rebalance hızını kontrol eder (1-11). Production'da genellikle **4-8** kullanılır.
+</Callout>
+
+## Cell Disk Troubleshooting Procedures
+
+### 1. Hatalı Disk'i Drop Etme
+
+```sql
+-- ASM instance'dan problemli disk'leri drop et
+ALTER DISKGROUP DATA1 DROP DISK 'DATA_DM01_orcl_dbf01cel02';
+ALTER DISKGROUP DATA2 DROP DISK 'DBFS_DG_orcl_dbf01cel02';
+ALTER DISKGROUP SYSTEMDG DROP DISK 'RECO_DM01_orcl_dbf01cel02';
+```
+
+### 2. ASM Disk'i Re-Add Etme
+
+```sql
+-- Disk'i ASM'ye geri ekle
+ALTER DISKGROUP DATA1 ADD DISK 'o/10.0.1.X/DATA_DM01_orcl_dbf01cel02';
+ALTER DISKGROUP DATA2 ADD DISK 'o/10.0.1.X/DBFS_DG_orcl_dbf01cel02';
+ALTER DISKGROUP RECO ADD DISK 'o/10.0.1.X/RECO_DM01_orcl_dbf01cel02';
+```
+
+### 3. ASM Power Limit Ayarı
+
+```sql
+-- Rebalance power limit'i görüntüle
+SHOW PARAMETER asm_power_limit
+
+-- Power limit'i ayarla (1-11 arası)
+ALTER SYSTEM SET asm_power_limit = 8 SCOPE = BOTH;
+```
+
+## Physical Disk Replacement
+
+### 1. Service LED'i Aktif Et
+
+Disk'in fiziksel olarak bulunması için **service LED**'i aktif edin:
+
+```bash
+# Problemli diskin service LED'ini yak
+cellcli -e 'alter physicaldisk 28:4 serviceled on'
+```
+
+Bu komut, diskin üzerindeki **LED'i yanar** ve fiziksel replacement için disk'i kolayca bulmanızı sağlar.
+
+### 2. Disk Replacement Procedure
+
+1. **ASM'den disk'i drop et** (yukarıda anlatıldı)
+2. **Service LED'i aktif et**
+3. **Disk'i fiziksel değiştir** (hardware team)
+4. **CellCLI'de disk'i replace et**:
+   ```bash
+   cellcli -e "alter physicaldisk 28:4 replace"
+   ```
+5. **ASM'ye disk'i geri ekle**
+6. **Rebalance operation'ı izle**
+
+### 3. Cell Alert Log Monitoring
+
+```bash
+# Cell alert logunu izle
+tail -300f /opt/oracle/cell11.2.3.2.0_LINUX.X64_120713/log/diag/asm/cell/dm01cel02/trace/alert.log
+```
+
+Disk replacement sonrası **alert log'da** disk'in tanındığına dair mesajları arayın.
+
+## Automated Monitoring Script
+
+### 1. Cell Disk Health Check Script
+
+```bash
+#!/bin/bash
+# exadata_cell_disk_check.sh
+
+# Cell server list
+CELL_SERVERS=("dm01cel01" "dm01cel02" "dm01cel03")
+
+for cell in "${CELL_SERVERS[@]}"; do
+  echo "Checking $cell..."
+
+  ssh root@$cell "cellcli -e list physicaldisk attributes name,status,errMediaCount,errOtherCount" | \
+  grep -v "normal" | \
+  grep -E "warning|critical"
+
+  if [ $? -eq 0 ]; then
+    echo "WARNING: Abnormal disk found on $cell"
+    # Send alert (email, SMS, monitoring system)
+  fi
+done
+```
+
+### 2. ASM Disk Health Check Script
+
+```sql
+-- asm_disk_health_check.sql
+SET LINESIZE 200
+SET PAGESIZE 100
+
+COLUMN name FORMAT a40
+COLUMN failgroup FORMAT a20
+COLUMN state FORMAT a10
+COLUMN mount_status FORMAT a15
+
+SELECT name,
+       failgroup,
+       state,
+       mount_status,
+       header_status,
+       mode_status,
+       total_mb,
+       free_mb,
+       ROUND(free_mb/total_mb*100, 2) AS pct_free
+FROM   v$asm_disk_stat
+WHERE  state != 'NORMAL'
+OR     mount_status != 'CACHED'
+ORDER BY failgroup, name;
+```
+
+## Proactive Monitoring Strategies
+
+### 1. Daily Health Check
+
+- [ ] Physical disk status check (CellCLI)
+- [ ] Grid disk status check
+- [ ] ASM diskgroup check
+- [ ] Rebalance operation monitor
+- [ ] Cell alert log scan
+
+### 2. Weekly Review
+
+- [ ] Error trend analizi
+- [ ] Predictive failure diskleri follow-up
+- [ ] Capacity planning
+- [ ] Rebalance performance review
+
+### 3. Monthly Maintenance
+
+- [ ] Firmware update check
+- [ ] Disk performance benchmark
+- [ ] ASM rebalance tuning
+- [ ] Documentation update
+
+## Best Practices
+
+### ✅ DO's
+
+1. **Daily monitoring**: Cell disk status'ini kontrol edin
+2. **Predictive failure**: Warning disk'leri immediate takip edin
+3. **ASM redundancy**: Disk drop etmeden önce redundancy kontrol edin
+4. **Rebalance monitoring**: Rebalance operation progress'i izleyin
+5. **Documentation**: Disk replacement'ları dokümante edin
+6. **Service LED**: Fiziksel replacement için kullanın
+
+### ❌ DON'Ts
+
+1. **Ignore warning**: Predictive failure'ları asla ignore etmeyin
+2. **Force drop**: Redundancy kontrolü olmadan disk drop etmeyin
+3. **Hardware skip**: Hardware team olmadan disk replacement yapmayın
+4. **Alert log unutma**: Cell alert log'larda hata aramayı unutmayın
+5. **Rebalance overflow**: Production'da yüksek power limit kullanmayın
+
+## Troubleshooting Flowchart
+
+```
+Cell Disk Warning Detected
+        ↓
+Check errMediaCount and status
+        ↓
+Predictive Failure?
+YES → Drop from ASM
+    → Physical replacement
+    → Re-add to ASM
+    → Monitor rebalance
+        ↓
+NO → Monitor trend
+    → Plan replacement
+```
+
+<Callout type="success">
+**Özet**
+Exadata cell disk monitoring, **proactive approach** ile **zero downtime** disk replacement sağlar. CellCLI komutları, ASM monitoring ve **predictive failure detection** ile production Exadata sistemlerinde **maximum availability** garanti edebilirsiniz.
+</Callout>

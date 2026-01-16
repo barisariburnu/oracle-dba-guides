@@ -1,0 +1,107 @@
+---
+title: "Oracle Data Redaction: Hassas Verileri Anlık Maskeleme"
+description: "Oracle Advanced Security ile gelen Data Redaction özelliği sayesinde veritabanındaki kredi kartı, TC kimlik no gibi hassas verileri uygulama seviyesinde nasıl maskeleyebilirsiniz?"
+date: "2026-01-16"
+category: "Güvenlik"
+tags: ["Oracle Data Redaction", "Security", "Advanced Security", "Data Masking", "Compliance", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Redaction: Hassas Verileri Anlık Maskeleme
+
+Günümüzde veri güvenliği ve regülasyonlar (KVKK, GDPR, PCI-DSS), hassas verilerin yetkisiz kişiler tarafından görülmesini engellemeyi zorunlu kılıyor. Oracle **Data Redaction**, veriyi diskte fiziksel olarak değiştirmeden, sorgu anında ("on-the-fly") maskeleyen güçlü bir güvenlik özelliğidir. Bu sayede, uygulama kodunda hiçbir değişiklik yapmadan veritabanı seviyesinde hassas bilgileri koruma altına alabilirsiniz.
+
+
+<!--truncate-->
+## 1. Data Redaction Türleri
+
+Oracle dört farklı maskeleme yöntemi sunar:
+
+-   **Full Redaction:** Tüm kolonu varsayılan bir değerle (örn: `0` veya `null`) maskeler.
+-   **Partial Redaction:** Kolonun sadece bir kısmını maskeler (Örn: Kredi kartının son 4 hanesi hariç yıldızlama).
+-   **Regular Expression:** Karmaşık desenler için (Örn: E-mail adresinin formatını koruyarak maskeleme).
+-   **Random Redaction:** Her sorguda rastgele bir değer gösterir.
+
+---
+
+## 2. Örnek Uygulama: Kredi Kartı Maskeleme
+
+Bir kredi kartı tablosundaki kart numarasını rastgele değerlerle maskeleyen bir politika (policy) oluşturalım:
+
+```sql
+BEGIN
+  DBMS_REDACT.ADD_POLICY (
+    object_schema => 'FINANS',
+    object_name   => 'MUSTERI_KARTLARI',
+    policy_name   => 'KART_NO_MASK',
+    column_name   => 'KREDI_KARTI_NO',
+    function_type => DBMS_REDACT.RANDOM, -- Rastgele değer göster
+    expression    => '1=1' -- Herkes için uygula
+  );
+END;
+/
+```
+
+---
+
+## 3. Dinamik Maskeleme (Context Kontrolü)
+
+Bazen sadece düşük yetkili kullanıcıların maskelenmiş veri görmesini, adminlerin ise gerçek veriyi görmesini istersiniz. Bunu `expression` parametresi ile sağlayabiliriz:
+
+```sql
+BEGIN
+  DBMS_REDACT.ADD_POLICY (
+    object_schema => 'FINANS',
+    object_name   => 'MAAS_BILGISI',
+    policy_name   => 'MAAS_GIZLE_POL',
+    column_name   => 'MAAS',
+    function_type => DBMS_REDACT.FULL,
+    -- Sadece 'MAAS_YONETICI' rolü olmayanlar için maskele
+    expression    => 'SYS_CONTEXT(''USERENV'', ''ISDBA'') = ''FALSE'''
+  );
+END;
+/
+```
+
+---
+
+## 4. Politikayı Değiştirme (Alter Policy)
+
+Var olan bir politikaya yeni kolonlar eklemek için `ALTER_POLICY` kullanılır:
+
+```sql
+BEGIN
+  DBMS_REDACT.ALTER_POLICY (
+    object_schema => 'FINANS',
+    object_name   => 'MUSTERI_KARTLARI',
+    policy_name   => 'KART_NO_MASK',
+    action        => DBMS_REDACT.ADD_COLUMN,
+    column_name   => 'SON_KULLANMA_TARIHI',
+    function_type => DBMS_REDACT.RANDOM
+  );
+END;
+/
+```
+
+---
+
+## 5. Politikayı Kaldırma
+
+```sql
+BEGIN
+  DBMS_REDACT.DROP_POLICY (
+    object_schema => 'FINANS',
+    object_name   => 'MUSTERI_KARTLARI',
+    policy_name   => 'KART_NO_MASK'
+  );
+END;
+/
+```
+
+## Özet ve Avantajlar
+
+-   **Performans:** Maskeleme işlemi SQL motorunda çok hızlı gerçekleşir ve neredeyse hiç overhead yaratmaz.
+-   **Uygulama Şeffaflığı:** Uygulama sorguyu normal gönderir (`SELECT * FROM ...`), maskeleme veritabanı tarafında otomatik yapılır.
+-   **Esneklik:** Kullanıcı rolüne, IP adresine veya bağlandığı terminale göre farklı maskeleme kuralları tanımlanabilir.
+
+Data Redaction, veri gizliliğini sağlamak ve yasal uyumlulukları (Compliance) yakalamak için modern veritabanı yönetiminde en verimli yöntemlerden biridir.

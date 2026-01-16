@@ -1,0 +1,423 @@
+---
+title: "Oracle Data Guard Sorun Çözme ve Gap Resolution - Troubleshooting Guide"
+description: "Oracle Data Guard ortamında yaygın sorunlar, gap çözme, MRP0 sorunları, archivelog shipping problemleri ve complete troubleshooting adımları."
+date: 2025-01-16
+category: "Oracle Data Guard"
+tags: ["oracle", "dataguard", "troubleshooting", "gap", "mrp", "standby", "recovery"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Sorun Çözme ve Gap Resolution
+
+Data Guard ortamlarında en sık karşılaşılan sorunlar **archivelog gap**, **MRP process sorunları**, **apply lag** ve **transport problemi** gibi durumlardır. Bu yazıda bu sorunların nasıl tespit edileceğini ve çözüleceğini detaylı olarak inceleyeceğiz.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Data Guard sorunlarında %80 oranında root cause network, disk alanı veya archivelog shipping konfigürasyonudur. Bu alanları ilk önce kontrol edin.
+</Callout>
+
+## Sorun Tespiti
+
+### 1. Gap Tespiti
+
+```sql
+-- Standby database'de gap kontrolü
+SELECT thread#,
+       low_sequence#,
+       high_sequence#
+FROM v$archive_gap;
+```
+
+**Çıktı (Gap varsa):**
+
+```
+   THREAD# LOW_SEQUENCE# HIGH_SEQUENCE#
+---------- ------------- --------------
+         1           450            452
+```
+
+### 2. MRP Process Durumu
+
+```sql
+-- MRP0 process durumunu kontrol et
+SELECT process,
+       status,
+       thread#,
+       sequence#,
+       block#,
+       blocks
+FROM v$managed_standby
+WHERE process = 'MRP0';
+```
+
+**Problem durumları:**
+- `STATUS = IDLE` - MRP çalışmıyor
+- `STATUS = WAIT_FOR_GAP` - Gap var, bekliyor
+- `STATUS = WAIT_FOR_LOG` - Sonraki log bekleniyor
+
+### 3. Apply Lag Kontrolü
+
+```sql
+SELECT name,
+       value,
+       unit
+FROM v$dataguard_stats
+WHERE name IN ('transport lag', 'apply lag');
+```
+
+## Yaygın Sorunlar ve Çözümleri
+
+### Sorun 1: UNNAME Datafile Hatası
+
+**Hata Mesajı:**
+
+```
+ORA-01157: cannot identify/lock data file 50 - see DBWR trace file
+ORA-01110: data file 50: '/oracle/appora/product/10.0.1.X/db/dbs/UNNAMED00050'
+```
+
+**Çözüm:**
+
+```sql
+-- 1. Standby file management'i kontrol et
+SHOW PARAMETER standby_file_management
+
+-- Değeri MANUAL ise, AUTO yap
+ALTER SYSTEM SET standby_file_management='AUTO' SCOPE=BOTH;
+
+-- 2. UNNAMED datafile'i oluştur
+ALTER DATABASE CREATE DATAFILE
+  '/oracle/appora/product/10.0.1.X/db/dbs/UNNAMED00050'
+  AS '+DATA';
+
+-- 3. MRP'yi yeniden başlat
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+```
+
+**Alternatif Çözüm:**
+
+```sql
+-- ASM disk group kullanma
+ALTER DATABASE CREATE DATAFILE 50 AS '+DATA';
+```
+
+<Callout type="warning" title="Kritik Uyarı">
+UNNAMED datafile hatası alındığında:
+1. Primary'de datafile'i kontrol edin
+2. Yeterli disk alanı olduğundan emin olun
+3. ASM disk group'unun mount olduğunu doğrulayın
+</Callout>
+
+### Sorun 2: Archivelog Gap - Sequence Eksikliği
+
+**Belirtiler:**
+- Apply lag sürekli artıyor
+- `v$archive_gap` view'da kayıt var
+- MRP0 process `WAIT_FOR_GAP` durumunda
+
+**Çözüm Adımları:**
+
+**Adım 1: Gap'ı tespit edin**
+
+```sql
+-- Standby'de
+SELECT thread#, low_sequence#, high_sequence#
+FROM v$archive_gap;
+```
+
+**Adım 2: Primary'de eksik archivelogları bulun**
+
+```sql
+-- Primary database'de
+SELECT name, sequence#, first_change#, next_change#
+FROM v$archived_log
+WHERE sequence# BETWEEN 450 AND 452
+  AND thread# = 1
+ORDER BY sequence#;
+```
+
+**Adım 3: Eksik archivelogları manuel kopyalayın**
+
+```bash
+# Primary'den standby'ye kopyalayın
+scp /oracle/arch/1_450_123456.arc standbyhost:/oracle/arc_gap/
+scp /oracle/arch/1_451_123456.arc standbyhost:/oracle/arc_gap/
+scp /oracle/arch/1_452_123456.arc standbyhost:/oracle/arc_gap/
+```
+
+**Adım 4: Standby'de archivelogları register edin**
+
+```sql
+-- Standby'de catalog işlemi
+ALTER DATABASE REGISTER LOGFILE '/oracle/arc_gap/1_450_123456.arc';
+ALTER DATABASE REGISTER LOGFILE '/oracle/arc_gap/1_451_123456.arc';
+ALTER DATABASE REGISTER LOGFILE '/oracle/arc_gap/1_452_123456.arc';
+```
+
+**Adım 5: MRP'yi restart edin**
+
+```sql
+-- Managed recovery'yi yeniden başlat
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+```
+
+### Sorun 3: MRP0 Process Çalışmıyor
+
+**Belirti:**
+```sql
+SELECT * FROM v$managed_standby WHERE process = 'MRP0';
+-- No rows selected
+```
+
+**Çözüm:**
+
+```sql
+-- 1. Database mount durumunu kontrol et
+SELECT open_mode, database_role
+FROM v$database;
+-- MOUNTED olmalı
+
+-- 2. Managed recovery'yi başlat
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE
+  USING CURRENT LOGFILE
+  DISCONNECT FROM SESSION;
+
+-- 3. Real-time apply isteniyorsa
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE
+  USING CURRENT LOGFILE
+  DISCONNECT FROM SESSION;
+
+-- 4. Standby'yi read-only açmak için (Active Data Guard)
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+ALTER DATABASE OPEN READ ONLY;
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE
+  USING CURRENT LOGFILE
+  DISCONNECT FROM SESSION;
+```
+
+### Sorun 4: FAL (Fetch Archive Log) Çalışmıyor
+
+**Belirti:**
+- Archiveloglar otomatik gelmiyor
+- Manual register gerekiyor
+
+**Çözüm:**
+
+```sql
+-- 1. FAL client ve server konfigürasyonu
+SHOW PARAMETER fal
+
+-- Primary'de (FAL_SERVER)
+ALTER SYSTEM SET fal_server = 'STANDBY' SCOPE=BOTH;
+
+-- Standby'de (FAL_CLIENT)
+ALTER SYSTEM SET fal_client = 'PRIMARY' SCOPE=BOTH;
+
+-- 2. Log_archive_dest_2'yi kontrol et
+SHOW PARAMETER log_archive_dest_2
+
+-- Örnek konfigürasyon:
+ALTER SYSTEM SET log_archive_dest_2 =
+  'SERVICE=standby LGWR ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE)
+   DB_UNIQUE_NAME=standby'
+  SCOPE=BOTH;
+```
+
+### Sorun 5: Apply Lag Çok Yüksek
+
+**Belirti:**
+- Apply lag saatlerce sürüyor
+- Apply rate çok düşük
+
+**Analiz:**
+
+```sql
+-- Apply rate'i kontrol et
+SELECT item,
+       sofar,
+       units
+FROM v$recovery_progress
+WHERE item LIKE '%Apply Rate%';
+```
+
+**Çözüm:**
+
+```sql
+-- 1. I/O performansını kontrol et
+SELECT * FROM v$recovery_progress
+WHERE item = 'Active Apply Rate';
+
+-- 2. Parallel apply'yi artır
+ALTER SYSTEM SET standby_parallel_instances=8 SCOPE=BOTH;
+
+-- 3. Disk I/O'yu kontrol et
+Linux:
+iostat -x 5
+
+Oracle:
+SELECT * FROM v$sysstat
+WHERE name LIKE '%physical %';
+```
+
+### Sorun 6: RFS Process Sorunu
+
+**Belirti:**
+```sql
+SELECT * FROM v$managed_standby WHERE process = 'RFS';
+-- STATUS = IDLE veya ERROR
+```
+
+**Çözüm:**
+
+```sql
+-- 1. Network bağlantısını test et
+-- Primary'den tnsping
+tnsping standby
+
+-- 2. Log_archive_dest_n durumunu kontrol et
+SELECT dest_id, status, error
+FROM v$archive_dest
+WHERE dest_id = 2;
+
+-- 3. Gerekirse dest'yi reset'le
+ALTER SYSTEM SET log_archive_dest_state_2=ENABLE SCOPE=BOTH;
+```
+
+## Monitor ve Maintenance Scriptleri
+
+### 1. Otomatik Gap Çözme Script
+
+```bash
+#!/bin/bash
+# dg_gap_resolve.sh - Data Guard gap resolution script
+
+ORACLE_SID=standby_db
+ORACLE_HOME=/oracle/product/11.2.0/db
+export ORACLE_SID ORACLE_HOME
+
+$ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+SET SERVEROUTPUT ON
+DECLARE
+  v_gap_count NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_gap_count FROM v\$archive_gap;
+
+  IF v_gap_count > 0 THEN
+    DBMS_OUTPUT.PUT_LINE('Gap detected: ' || v_gap_count || ' gaps');
+
+    -- Gap bilgilerini görüntüle
+    FOR gap_rec IN (SELECT thread#, low_sequence#, high_sequence#
+                    FROM v\$archive_gap)
+    LOOP
+      DBMS_OUTPUT.PUT_LINE('Thread: ' || gap_rec.thread# ||
+                           ', Seq: ' || gap_rec.low_sequence# ||
+                           ' - ' || gap_rec.high_sequence#);
+    END LOOP;
+  ELSE
+    DBMS_OUTPUT.PUT_LINE('No gap detected');
+  END IF;
+END;
+/
+
+EXIT;
+EOF
+```
+
+### 2. Lag Kontrol Script
+
+```bash
+#!/bin/bash
+# dataguard_lag_check.sh
+
+$ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0
+SELECT value
+FROM v\$dataguard_stats
+WHERE name = 'apply lag'
+  AND TO_NUMBER(SUBSTR(value, 1, 2)) * 60 +
+      TO_NUMBER(SUBSTR(value, 7, 2)) > 30;
+EOF
+```
+
+### 3. MRP Status Check
+
+```bash
+#!/bin/bash
+# mrp_status_check.sh
+
+STATUS=$($ORACLE_HOME/bin/sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0
+SELECT status
+FROM v\$managed_standby
+WHERE process = 'MRP0';
+EOF
+)
+
+if [ "$STATUS" != "APPLYING_LOG" ]; then
+  echo "WARNING: MRP0 status is $STATUS"
+  # Email gönder
+  echo "MRP0 not applying logs. Status: $STATUS" | mail -s "DG Alert" dba@company.com
+fi
+```
+
+## Best Practices
+
+### 1. Düzenli Backup
+
+```sql
+-- Standby database'de de backup alın
+-- Primary'den farklı zamanda
+BACKUP DATABASE;
+```
+
+### 2. Snapshot Standby Kullanımı
+
+```bash
+# Snapshot standby ile test yapın
+-- 1. Convert to snapshot
+ALTER DATABASE CONVERT TO SNAPSHOT STANDBY;
+
+-- 2. Test işlemlerini yap
+
+-- 3. Geri dön
+ALTER DATABASE CONVERT TO PHYSICAL STANDBY;
+```
+
+### 3. Graceful Switchover
+
+```sql
+-- Primary'de:
+SELECT switchover_status FROM v$database;
+-- TO_STANDBY olmalı
+
+ALTER DATABASE COMMIT TO SWITCHOVER TO PHYSICAL STANDBY;
+
+-- Standby'de:
+SELECT switchover_status FROM v$database;
+-- TO_PRIMARY olmalı
+
+ALTER DATABASE COMMIT TO SWITCHOVER TO PRIMARY;
+```
+
+## Troubleshooting Checklist
+
+- [ ] Network bağlantısı (ping, tnsping)
+- [ ] Disk alanı (df -h)
+- [ ] Archivelog dest status
+- [ ] MRP process durumu
+- [ ] Apply lag değeri
+- [ ] Sequence gap kontrolü
+- [ ] Alert log kontrolü
+- [ ] FAL konfigürasyonu
+- [ ] Standby_file_management parametresi
+- [ ] Log_archive_config ayarı
+
+## İlgili Kaynaklar
+
+- [Data Guard Broker Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/19/dgbk/)
+- [Data Guard Troubleshooting Guide](https://docs.oracle.com/en/database/oracle/oracle-database/19/dgbk/troubleshooting-oracle-data-guard.html)
+- [V$MANAGED_STANDBY Reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/V-MANAGED-STANDBY.html)
+
+Bu yazıda Data Guard sorun çözme tekniklerini öğrendiniz. Diğer Data Guard yazılarımız için blog sayfamızı ziyaret edin.

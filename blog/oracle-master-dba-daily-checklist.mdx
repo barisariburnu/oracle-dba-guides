@@ -1,0 +1,106 @@
+---
+title: "Eksiksiz Oracle DBA Günlük Kontrol Listesi (Master Daily Checklist)"
+description: "Bir veritabanı yöneticisinin her sabah yapması gereken temel kontroller: Yedekleme, performans, disk alanı, loglar ve yüksek erişilebilirlik (RAC/DG) takibi."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "DBA Checklist", "Maintenance", "Monitoring", "Database Administration"]
+author: "Oracle DBA Blog"
+---
+
+# Eksiksiz Oracle DBA Günlük Kontrol Listesi
+
+Veritabanı yöneticiliği (DBA), proaktif olmayı gerektiren bir meslektir. Bir sorun oluşmadan önce onu fark etmek, sistemin sürekliliğini sağlar. Her sabah ilk iş olarak yapılması gereken rutin kontroller, veritabanınızın sağlığını garanti altına alır.
+
+
+<!--truncate-->
+Bu makalede, kritik sistemleri yöneten kıdemli DBA'lerin kullandığı kapsamlı günlük kontrol listesini bulabilirsiniz.
+
+## 1. Yedekleme Kontrolleri (Backup)
+
+En önemli kural: **Yedeği olmayanın geleceği de olmaz.**
+-   RMAN yedekleri başarıyla tamamlandı mı?
+-   Arşiv log dosyaları düzenli olarak siliniyor mu?
+
+```sql
+SELECT session_key, input_type, status,
+       to_char(start_time,'dd/mm/yy hh24:mi') start_time,
+       to_char(end_time,'dd/mm/yy hh24:mi') end_time,
+       round(elapsed_seconds/3600,2) full_hours
+FROM v$rman_backup_job_details
+ORDER BY start_time DESC;
+```
+
+---
+
+## 2. tablespace ve Disk Alanı Kontrolleri
+
+-   Kritik tablespace'lerin doluluk oranı %90'ın üzerinde mi?
+-   Sunucu işletim sistemi seviyesindeki mount point'lerde yer var mı? (`df -h`)
+
+```sql
+SELECT tablespace_name, round(used_percent, 2) as used_pct
+FROM dba_tablespace_usage_metrics
+WHERE used_percent > 90;
+```
+
+---
+
+## 3. Log ve Hata Kontrolleri
+
+-   `alert.log` dosyasında son 24 saatte yeni bir `ORA-` hatası oluştu mu?
+-   Geçersiz (invalid) objelerin sayısı arttı mı?
+
+```sql
+-- Geçersiz obje kontrolü
+SELECT owner, object_type, count(*) 
+FROM dba_objects 
+WHERE status = 'INVALID' 
+GROUP BY owner, object_type;
+```
+
+---
+
+## 4. İş (Job) ve Otomasyon Kontrolleri
+
+-   Kritik DBMS_SCHEDULER işleri hata aldı mı?
+-   Veritabanı istatistikleri (stats) güncel mi?
+
+```sql
+SELECT job_name, status, last_start_date 
+FROM dba_scheduler_jobs 
+WHERE status = 'FAILED' OR state = 'BROKEN';
+```
+
+---
+
+## 5. Yüksek Erişilebilirlik (RAC & DataGuard)
+
+-   **RAC:** Tüm instance'lar ve cluster kaynakları (`crsctl status resource -t`) ayakta mı?
+-   **DataGuard:** Primary ve Standby arasındaki "Lag" süresi ne kadar?
+
+```sql
+-- Data Guard gecikme kontrolü
+SELECT name, value FROM v$dataguard_stats;
+```
+
+---
+
+## 6. Performans İzleme
+
+-   Sistemdeki beklemeler (wait events) normal mi?
+-   Engellenen (Blocked) oturumlar var mı?
+
+```sql
+-- Kilitleyen oturumları görme
+SELECT sid, serial#, username, blocking_session, wait_class 
+FROM v$session 
+WHERE blocking_session IS NOT NULL;
+```
+
+## Özet: Güne Başlarken Yapılacaklar
+
+1.  **E-postaları Kontrol Edin:** Gece çalışan otomatize raporlardan gelen hata bildirimleri var mı?
+2.  **Dashboard/İzleme:** OEM veya monitör tool'larınıza göz atın.
+3.  **Kritik Sorguları Çalıştırın:** Yukarıdaki master checklist sorgularını periyodik olarak çalıştırın.
+
+Düzenli yapılan bu kontroller, kriz anlarında yaşayacağınız stresi azaltır ve sisteminizin güvenilirliğini artırır.

@@ -1,0 +1,103 @@
+---
+title: "Oracle Unindexed Foreign Keys ve Deadlock Önleme"
+description: "Oracle veritabanında indexlenmemiş foreign key kolonlarını tespit etme, kilitlenme (locking) sorunları, deadlock riskleri ve şema optimizasyonu."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle Index", "Foreign Key", "Deadlock", "Locking", "Database Performance", "DBA Maintenance"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Unindexed Foreign Keys: Gizli Performans Katili
+
+Oracle veritabanında **Foreign Key (Dış Anahtar)** kullanımı, veri bütünlüğü için olmazsa olmazdır. Ancak, çoğu DBA ve geliştirici tarafından gözden kaçırılan çok kritik bir kural vardır: **Foreign key kolonları her zaman indexlenmelidir.** Eğer bir foreign key kolonu indexlenmezse, parent (ana) tabloda yapılan bir DELETE veya UPDATE işlemi, child (bağlı) tablonun tamamının kilitlenmesine (Full Table Lock) yol açabilir. Bu makalede, indexlenmemiş foreign key'leri nasıl tespit edeceğinizi ve neden bu kadar tehlikeli olduklarını inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Foreign Key'leri Indexlemeliyiz?
+
+Oracle'da indexlenmemiş bir foreign key şu sorunlara yol açar:
+
+1.  **Full Table Lock (TM Lock):** Parent tabloda bir kayıt silindiğinde veya primary key'i güncellendiğinde, Oracle child tabloda ilgili kayıt olup olmadığını kontrol etmek ister. Eğer index yoksa, tüm tabloyu kilitler (Share Lock). Bu da diğer kullanıcıların child tabloya veri girmesini engeller.
+2.  **Deadlock Riski:** İki farklı işlem birbirinin kilitlediği tabloları beklemeye başlar ve sistem kilitlenir (ORA-00060).
+3.  **DML Performansı:** Parent-child ilişkisi olan tablolarda veri silme ve güncelleme işlemleri inanılmaz yavaşlar.
+
+---
+
+## Indexlenmemiş Foreign Key'leri Tespit Etme
+
+Aşağıdaki SQL sorgusu, bir şema altındaki tüm foreign key'leri tarar ve hangilerinin indexi olmadığını listeler:
+
+```sql
+SELECT CASE 
+         WHEN b.index_name IS NULL THEN 'UNINDEXED' 
+         ELSE 'INDEXED' 
+       END AS status,
+       a.table_name,
+       a.constraint_name AS fk_name,
+       a.fk_columns,
+       b.index_name,
+       b.index_columns
+FROM (
+    -- Foreign Key kolonlarını listele
+    SELECT a.table_name, 
+           a.constraint_name, 
+           LISTAGG(a.column_name, ',') WITHIN GROUP (ORDER BY a.position) AS fk_columns
+    FROM dba_cons_columns a, dba_constraints b
+    WHERE a.constraint_name = b.constraint_name
+      AND b.constraint_type = 'R' -- Referential (Foreign Key)
+      AND a.owner = UPPER('SCHEMA_NAME')
+      AND a.owner = b.owner
+    GROUP BY a.table_name, a.constraint_name
+) a
+LEFT JOIN (
+    -- Mevcut Index kolonlarını listele
+    SELECT table_name, 
+           index_name, 
+           LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.column_position) AS index_columns
+    FROM dba_ind_columns c
+    WHERE c.index_owner = UPPER('SCHEMA_NAME')
+    GROUP BY table_name, index_name
+) b ON a.table_name = b.table_name 
+    AND b.index_columns LIKE a.fk_columns || '%' -- Index FK ile başlamalı
+WHERE b.index_name IS NULL
+ORDER BY a.table_name;
+```
+
+<Callout type="info" title="Neden LIKE ile kontrol ediyoruz?">
+Bir foreign key'in "indexlenmiş" sayılması için, indexin **mutlaka** foreign key kolon(lar)ı ile başlaması gerekir. Indexin sonunda yer alan bir kolon, full table lock'ı engellemez.
+</Callout>
+
+---
+
+## Çözüm: Eksik Indexleri Oluşturma
+
+Tespit edilen "UNINDEXED" kayıtlar için şu şekilde indexler oluşturmalısınız:
+
+```sql
+-- Tek kolonlu FK için
+CREATE INDEX idx_emp_dept_id ON emp(dept_id) ONLINE;
+
+-- Çok kolonlu (Composite) FK için
+-- FK kolon sırasıyla aynı olmalıdır!
+CREATE INDEX idx_order_items_fk ON order_items(order_id, line_id) ONLINE;
+```
+
+---
+
+## Ne Zaman Index Gerekmez?
+
+Her kuralın bir istisnası vardır. Şu durumlarda FK indexi şart değildir:
+- Parent tablodan asla **DELETE** yapılmıyorsa.
+- Parent tablonun **Primary Key**'i asla güncellenmiyorsa.
+- Child tablo çok küçükse (birkaç blok) ve full table scan maliyeti önemsizse.
+
+Ancak iyi bir DBA pratiği olarak, istisna aramaktansa tüm foreign key'leri indexlemek her zaman daha güvenlidir.
+
+## Özet ve Aksiyon Planı
+
+1.  **Denetim:** Yukarıdaki sorguyu veritabanınızda çalıştırın.
+2.  **Önceliklendirme:** Çok sık silme/güncelleme yapılan tablolardaki eksik indexlere öncelik verin.
+3.  **Deployment:** Indexleri `ONLINE` parametresiyle oluşturarak canlı sistemi etkilemeden işlemi tamamlayın.
+4.  **Standart:** Yeni geliştirilen tüm tablolarda foreign key tanımlanırken indexinin de oluşturulduğundan emin olun.
+
+Unindexed foreign key'leri temizlemek, veritabanınızdaki kilitlenme (locking) sürelerini azaltmanın en kolay ve en etkili yollarından biridir.

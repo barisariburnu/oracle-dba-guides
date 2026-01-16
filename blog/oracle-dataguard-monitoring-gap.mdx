@@ -1,0 +1,86 @@
+---
+title: "Oracle Data Guard Monitoring ve Gap Analizi"
+description: "Data Guard ortamlarında lag (gecikme) takibi, gap (boşluk) tespiti ve çözümü, standby redo log yönetimi ve monitoring sorguları."
+date: 2026-01-16
+category: "Oracle Disaster Recovery"
+tags: ["oracle", "data guard", "monitoring", "gap analysis", "lag", "standby", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Monitoring ve Gap Analizi
+
+Bir Data Guard ortamının sağlıklı çalışıp çalışmadığını anlamak için sadece "UP" olması yeterli değildir. Primary ile Standby arasındaki veri senkronizasyonu (Transport Lag ve Apply Lag) düzenli olarak izlenmelidir. Bu makalede, Data Guard sağlığını izlemek ve olası bir Gap (Log farkı) durumunu çözmek için kullanılan teknikleri inceleyeceğiz.
+
+
+<!--truncate-->
+## Data Guard Sağlık Kontrolü Sorguları
+
+### 1. Genel Durum ve Lag Takibi
+
+Standby veritabanında çalıştırılan bu sorgu, senkronizasyon durumunu net bir şekilde gösterir:
+
+```sql
+SELECT name, value, datum_time, time_computed
+FROM v$dataguard_stats;
+```
+
+- **Transport Lag:** Logların hedefe ulaşmasındaki gecikme.
+- **Apply Lag:** Logların hedefe ulaştıktan sonra veritabanına işlenmesindeki gecikme.
+
+### 2. Süreçlerin (Processes) İzlenmesi
+
+```sql
+SELECT process, status, thread#, sequence#, block#, blocks
+FROM v$managed_standby;
+```
+
+- **RFS (Remote File Server):** Logları alan süreç.
+- **MRP (Managed Recovery Process):** Logları uygulayan süreç. Status `APPLYING_LOG` olmalıdır.
+
+## Data Guard Gap (Boşluk) Analizi
+
+Eğer Primary ile Standby arasındaki network bir süre kesilirse veya Standby kapalı kalırsa "Gap" oluşur. Normalde Oracle bu boşluğu otomatik (`FAL_SERVER` parametresi ile) doldurur ancak bazen manuel müdahale gerekebilir.
+
+### Gap Tespiti
+
+```sql
+-- Standby'da çalıştırın
+SELECT * FROM v$archive_gap;
+```
+
+Eğer bu sorgu bir satır dönüyorsa, Standby tarafı ilgili `low_sequence#` ve `high_sequence#` arasındaki logları bulamıyor demektir.
+
+### Gap Çözümü (Manuel)
+
+1. **Eksik Logları Bulun:** Primary veritabanında ilgili sequence numaralarına sahip dosyaları bulun.
+2. **Kopyalayın:** Dosyaları standby sunucusuna işletim sistemi seviyesinde kopyalayın.
+3. **Register Edin:** Standby veritabanına bu logları elle tanıtın:
+   ```sql
+   ALTER DATABASE REGISTER LOGFILE '/u01/app/oracle/arch/arc_123_1.arc';
+   ```
+
+## Standby Redo Log (SRL) Önemi
+
+Senkron (SYNC) veya Asenkron (ASYNC) log gönderiminde en yüksek performansı almak için **Standby Redo Log** kullanımı zorunludur. SRL sayesinde loglar işletim sistemine yazılmadan doğrudan Standby Redo Log'lara yazılır.
+
+### SRL Oluşturma Kuralı
+
+Kural: `(Primary Log Group Sayısı + 1) * Thread Sayısı`.
+
+```sql
+ALTER DATABASE ADD STANDBY LOGFILE GROUP 11 ('+DATA') SIZE 500M;
+```
+
+## Kullanım Senaryosu: Lag Mail Alert
+
+Gecikme (Lag) süresi 1 saati geçerse alert üretmek için:
+
+```sql
+SELECT value FROM v$dataguard_stats 
+WHERE name = 'apply lag' 
+  AND value > '+00 01:00:00';
+```
+
+## Sonuç
+
+Data Guard'da "sıfır veri kaybı" (Zero Data Loss) hedefine ulaşmak için sistemin sürekli monitor edilmesi şarttır. Gap analizi ve standby redo log yönetimi, olası bir felaket kurtarma anında veritabanınızın ne kadar güncel olacağını belirler.

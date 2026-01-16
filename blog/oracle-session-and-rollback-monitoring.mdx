@@ -1,0 +1,75 @@
+---
+title: "Oracle Oturum Yönetimi: Rollback İzleme ve Uzun Süren Sorguların Kontrolü"
+description: "Oracle veritabanında geri alma (Rollback) aşamasındaki oturumların ilerlemesini izleme, performansı etkileyen uzun süreli sorguları otomatik sonlandırma yöntemleri."
+date: "2026-01-16"
+category: "Tanılama"
+tags: ["Oracle", "Session Management", "Rollback Monitoring", "SQL Performance", "DBA", "Query Killer"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Oturum Yönetimi: Rollback ve Uzun Sorgu Takibi
+
+Veritabanı operasyonlarında bazen bir oturumu sonlandırmak (kill) yetmez. Özellikle büyük bir `UPDATE` veya `DELETE` işlemi sırasında sonlandırılan oturumlar, veritabanı tutarlılığını sağlamak için **Rollback** işlemine başlar. Bu süreç bazen işlemin kendisinden daha uzun sürebilir ve sistem kaynaklarını tüketmeye devam eder. Bu makalede, rollback süreçlerini izlemeyi ve uzun süren sorguları yönetmeyi öğreneceğiz.
+
+
+<!--truncate-->
+## 1. Rollback Yapan Oturumları İzleme
+
+Bir oturumun ne kadar veriyi geri aldığını ve tahmini ne zaman biteceğini `v$transaction` görünümü üzerinden takip edebiliriz.
+
+```sql
+SELECT s.sid, s.serial#, s.username, s.status,
+       t.used_urec as "Undo Records",
+       t.used_ublk as "Undo Blocks",
+       round(t.used_ublk * 8192 / 1024 / 1024, 2) as "Rollback MB"
+FROM v$session s, v$transaction t
+WHERE s.saddr = t.ses_addr
+  AND s.status = 'KILLED'; -- Genellikle killed durumundaki oturumlar rollback yapar
+```
+*Not: "Undo Records" değerinin giderek azaldığını görüyorsanız, rollback işlemi başarıyla devam ediyor demektir.*
+
+---
+
+## 2. Uzun Süren Sorguları Otomatik Sonlandırma
+
+Sistemi kilitleyen veya kaynakları sömüren çok uzun süreli sorguları manuel takip etmek yerine bir PL/SQL prosedürü ile otomatize edebilirsiniz.
+
+### Örnek Prosedür (Query Killer):
+```sql
+CREATE OR REPLACE PROCEDURE KILL_LONG_RUNNING_QUERIES (p_seconds NUMBER) AS
+BEGIN
+  FOR rec IN (
+    SELECT sid, serial#, username, last_call_et
+    FROM v$session
+    WHERE status = 'ACTIVE'
+      AND type != 'BACKGROUND'
+      AND last_call_et > p_seconds -- Parametre olarak verilen saniyeden uzun sürenler
+      AND username NOT IN ('SYS', 'SYSTEM', 'DBSNMP') -- Kritik kullanıcıları hariç tut
+  ) LOOP
+    EXECUTE IMMEDIATE 'ALTER SYSTEM KILL SESSION ''' || rec.sid || ',' || rec.serial# || ''' IMMEDIATE';
+    DBMS_OUTPUT.PUT_LINE('Killed SID: ' || rec.sid || ' Username: ' || rec.username);
+  END LOOP;
+END;
+/
+```
+
+---
+
+## 3. Bekleyen ve Bekleten Süreç Analizi
+
+Hangi oturumun hangi işletim sistemi süreci (PID) ile çalıştığını ve ne kadar süredir beklediğini görmek için:
+
+```sql
+SELECT s.sid, s.serial#, p.spid as "OS_PID", s.last_call_et as "Seconds_Active", s.event
+FROM v$session s, v$process p
+WHERE s.paddr = p.addr
+  AND s.status = 'ACTIVE';
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Zorla Kapatma (Kill):** Bir oturumu `IMMEDIATE` ile kapatmak süreci hızlandırır ancak rollback kaçınılmazdır.
+-   **İzleme:** Rollback yapan bir oturum varken veritabanını kapatıp açmak (Restart) temizlik sürecini (`Parallel Recovery`) daha da uzatabilir. Sabırlı olup izlemek en iyisidir.
+-   **Resource Manager:** Sorgu sürelerini sınırlamak için prosedür yazmak yerine Oracle **Resource Manager** kullanarak `MAX_ESTIMATED_EXECUTION_TIME` limiti atamak daha profesyonel bir yaklaşımdır.
+
+Oturum yönetimi, veritabanının "trafik polisliği"dir. Hangi aracın nerede durduğunu ve ne zaman ilerleyeceğini bilmek, karmaşayı önler.

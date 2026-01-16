@@ -1,0 +1,115 @@
+---
+title: "Oracle Otomatik Session Kill ve Long Running Query Yönetimi"
+description: "Veritabanını kilitleyen blocking session'ları veya sistem kaynaklarını tüketen uzun süreli (long running) sorguları otomatik sonlandırma ve loglama rehberi."
+date: 2026-01-16
+category: "Oracle Otomasyon"
+tags: ["oracle", "kill session", "automation", "pl/sql", "blocking session", "long running queries", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Otomatik Session Kill ve Long Running Query Yönetimi
+
+Oracle veritabanlarında bazı sorgular çok uzun sürebilir veya saatlerce bir tabloyu kilitleyerek (blocking) tüm uygulamanın durmasına neden olabilir. Bu tür durumlarda DBA'nın manuel müdahalesi gecikebilir. Bu makalede, belirli kriterlere uyan "zararlı" session'ları otomatik olarak sonlandıran bir PL/SQL prosedürü ve loglama mekanizmasını inceleyeceğiz.
+
+
+<!--truncate-->
+## Otomatik Kill Mekanizması Nasıl Çalışır?
+
+Sistemi otomatize etmek için üç temel bileşene ihtiyacımız var:
+1. **Log Tablosu:** Kimin, ne zaman ve hangi hatayla öldürüldüğünü takip etmek için.
+2. **PL/SQL Prosedürü:** `GV$SQL_MONITOR` veya `V$SESSION` view'lerini sorgulayarak kriterlere uyanları öldürür.
+3. **DBMS_JOB / SCHEDULER:** Prosedürü belirli aralıklarla (örneğin her 1 dakikada bir) çalıştırır.
+
+## 1. Log Tablosunun Oluşturulması
+
+Önce sonlandırılan session'ların detaylarını saklayacak tabloyu hazırlayalım:
+
+```sql
+CREATE TABLE sys.sessionkill_log (
+    kill_date     DATE,
+    username      VARCHAR2(30),
+    program       VARCHAR2(64),
+    module        VARCHAR2(64),
+    sql_id        VARCHAR2(13),
+    elapsed_time  NUMBER,
+    kill_id       VARCHAR2(50),
+    message       VARCHAR2(2000)
+);
+```
+
+## 2. Otomatik Kill Prosedürü
+
+Aşağıdaki prosedür, belirli bir kullanıcıya ait olan ve belirtilen süreden (mil saniye) daha uzun süren aktif sorguları sonlandırır.
+
+```sql
+CREATE OR REPLACE PROCEDURE sys.kill_long_running_query (
+   p_user   IN VARCHAR2 DEFAULT 'APP_USER',
+   p_time   IN NUMBER DEFAULT 60000 -- 60 saniye
+)
+IS
+   PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+   FOR i IN (SELECT vs.username,
+                    vs.program,
+                    vs.module,
+                    vs.sql_id,
+                    vs.elapsed_time / 1000 AS elapsed_sec,
+                    vs.sid || ',' || vs.session_serial# AS killId
+             FROM gv$sql_monitor vs
+             WHERE status NOT LIKE 'DONE%'
+               AND elapsed_time > p_time
+               AND username = p_user)
+   LOOP
+      BEGIN
+         -- Session'ı sonlandır
+         EXECUTE IMMEDIATE 'ALTER SYSTEM KILL SESSION ''' || i.killId || ''' IMMEDIATE';
+         
+         -- Başarılı log
+         INSERT INTO sys.sessionkill_log VALUES (
+             SYSDATE, i.username, i.program, i.module, i.sql_id, i.elapsed_sec, i.killId, 'KILLED'
+         );
+      EXCEPTION
+         WHEN OTHERS THEN
+            -- Hata durumunda (örneğin session zaten kapandıysa) logla
+            INSERT INTO sys.sessionkill_log VALUES (
+                SYSDATE, i.username, i.program, i.module, i.sql_id, i.elapsed_sec, i.killId, SQLERRM
+            );
+      END;
+   END LOOP;
+   COMMIT;
+END;
+/
+```
+
+## 3. Otomasyon Job'ının Kurulması
+
+Prosedürün her dakika çalışması için bir `DBMS_JOB` (veya modern versiyonlarda `DBMS_SCHEDULER`) oluşturalım:
+
+```sql
+DECLARE
+  l_job  NUMBER;
+BEGIN
+  DBMS_JOB.SUBMIT(
+    job       => l_job,
+    what      => 'BEGIN sys.kill_long_running_query(''REPORTS_USER'', 300000); END;', -- 5 dakika
+    next_date => SYSDATE,
+    interval  => 'SYSDATE + 1/(24*60)' -- Her 1 dakikada bir
+  );
+  COMMIT;
+END;
+/
+```
+
+## Dikkat Edilmesi Gerekenler
+
+- **Geri Dönüş (Rollback):** Bir session'ı öldürdüğünüzde, yaptığı işlemlerin geri dönmesi (rollback) zaman alabilir. `IMMEDIATE` parametresi kontrolü hemen size verir ama veritabanı arka planda rollback yapmaya devam eder.
+- **Whitelist:** Kritik sistem kullanıcılarını (SYS, SYSTEM vb.) veya yedekleme job'larını yanlışlıkla öldürmemek için prosedürde mutlaka `username` filtresi kullanın.
+- **Log İzleme:** `sessionkill_log` tablosunu her gün kontrol edin. Eğer bir kullanıcı sürekli öldürülüyorsa, uygulamanın kodunda veya SQL sorgusunda bir sorun (indeks eksikliği vb.) olabilir.
+
+<Callout type="warning" title="Önemli Uyarı">
+Otomatik kill mekanizması tehlikelidir. Uygulamadan önce kriterlerinizi (süre, kullanıcı, sql_id vb.) dev ortamda çok iyi test edin. Yanlış bir konfigürasyon tüm uygulamanın çalışmasını engelleyebilir.
+</Callout>
+
+## Sonuç
+
+Otomatik session killing, özellikle kontrol edilemeyen raporlama sorguları veya kötü yazılmış batch job'ların veritabanını felç etmesini önlemek için son çare olarak kullanılan etkili bir yöntemdir. Loglama ile birleştirildiğinde, sistemdeki anomalileri tespit etmek için de değerli bir veri kaynağı sağlar.

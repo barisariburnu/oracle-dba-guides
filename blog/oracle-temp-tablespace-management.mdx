@@ -1,0 +1,75 @@
+---
+title: "Oracle Temporary Tablespace Yönetimi: İzleme ve Optimizasyon"
+description: "Oracle veritabanında geçici tablespace (TEMP) kullanımı, en çok TEMP harcayan sorguların tespiti ve dolan TEMP alanının temizlenmesi."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "TEMP Tablespace", "Monitoring", "SQL Tuning", "DBA", "Space Management"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Temporary Tablespace Yönetimi
+
+**Temporary Tablespace (TEMP)**, Oracle veritabanında bellek (PGA) yetmediğinde sıralama (Sort), birleştirme (Hash Join) ve indeks oluşturma gibi işlemlerin diske taştığı alandır. Eğer TEMP tablespace dolarsa, kullanıcılar `ORA-01652: unable to extend temp segment` hatası alır ve işlemler yarıda kesilir.
+
+
+<!--truncate-->
+Bu makalede, TEMP kullanımını nasıl izleyeceğinizi ve optimize edeceğinizi öğreneceğiz.
+
+## 1. TEMP Tablespace Doluluk Oranı
+
+Kritik bir hata almadan önce mevcut doluluk oranını kontrol etmek için:
+
+```sql
+SELECT tablespace_name,
+       total_blocks * 8192 / 1024 / 1024 as total_mb,
+       used_blocks * 8192 / 1024 / 1024 as used_mb,
+       free_blocks * 8192 / 1024 / 1024 as free_mb
+FROM v$sort_segment;
+```
+
+---
+
+## 2. En Çok TEMP Harcayan Oturumları Bulma
+
+Hangi kullanıcının veya hangi SQL'in TEMP alanını bitirdiğini bulmak için `v$sort_usage` ve `v$session` görünümlerini birleştiriyoruz:
+
+```sql
+SELECT s.sid, s.serial#, s.username, s.program,
+       u.tablespace, u.contents, u.extents, u.blocks * 8192 / 1024 / 1024 as mb_used
+FROM v$session s, v$sort_usage u
+WHERE s.saddr = u.session_addr
+ORDER BY mb_used DESC;
+```
+
+---
+
+## 3. Dolan TEMP Alanını Boşaltma (Shrink)
+
+Normalde TEMP alanı işlem bittiğinde otomatik boşalır ancak bazen yüksek HWM seviyesi nedeniyle diskte yer açılmaz. Oracle 11g sonrası `SHRINK` komutu ile bu alanı geri kazanabilirsiniz:
+
+```sql
+-- Tüm tablespace'i küçült
+ALTER TABLESPACE TEMP SHRINK SPACE;
+
+-- Sadece belirli bir dosyayı hedefle
+ALTER TABLESPACE TEMP SHRINK TEMPFILE '/u01/oradata/temp01.dbf' KEEP 100M;
+```
+
+---
+
+## 4. Kullanıcıya Özel TEMP Tablespace Atama
+
+Çok yoğun rapor çeken bir kullanıcının diğerlerini etkilememesi için ona özel bir TEMP alanı atayabilirsiniz:
+
+```sql
+CREATE TEMPORARY TABLESPACE TEMP_REPORTING TEMPFILE '/u01/oradata/temp_rep01.dbf' SIZE 500M;
+ALTER USER rapor_cu TEMPORARY TABLESPACE TEMP_REPORTING;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **PGA_AGGREGATE_TARGET:** Eğer TEMP kullanımı çok fazlaysa, PGA boyutunu artırmak sıralama işlemlerinin bellekte kalmasını sağlayarak performansı artırır.
+-   **Tempfile Yeniden Oluşturma:** Eğer bir tempfile çok büyüdüyse ve küçülmüyorsa, yeni bir TEMP tablespace oluşturup varsayılan (`DEFAULT`) yaptıktan sonra eskisini silebilirsiniz.
+-   **İndeksler:** Büyük indeks oluşturma işlemleri sırasında TEMP ihtiyacı tavan yapar. Bu tür operasyonlar için geçici olarak geniş bir alan ayırın.
+
+TEMP yönetimi, özellikle büyük veri işleyen sistemlerde operasyonel sürekliliğin anahtarıdır.

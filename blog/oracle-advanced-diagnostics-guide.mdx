@@ -1,0 +1,87 @@
+---
+title: "Oracle Gelişmiş Tanılama: LogMiner ve Metadata Yönetimi"
+description: "Oracle veritabanında geçmişe dönük veri analizi için LogMiner kullanımı, metadata dışarı aktarma (DBMS_METADATA) ve ORADEBUG komutları."
+date: "2026-01-16"
+category: "Tanılama"
+tags: ["Oracle", "LogMiner", "DBMS_METADATA", "ORADEBUG", "Database Diagnostics", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Gelişmiş Tanılama ve Metadata Yönetimi
+
+Veritabanında "kim, ne zaman, hangi veriyi sildi?" sorusuna yanıt bulmak veya karmaşık bir objenin tam DDL kodunu (Create Script) almak, bir DBA için kritik yeteneklerdir. Oracle, bu tür derinlemesine analizler için **LogMiner**, **DBMS_METADATA** ve **ORADEBUG** gibi güçlü araçlar sunar.
+
+
+<!--truncate-->
+Bu makalede, bu araçların nasıl kullanılacağını gerçek senaryolarla inceleyeceğiz.
+
+## 1. Oracle LogMiner ile Log Analizi
+
+LogMiner, veritabanı Redo Log ve Archive Log dosyalarını okuyarak, geçmişte yapılan tüm DML (Insert, Update, Delete) ve DDL işlemlerini görmenizi sağlar. En büyük avantajı, silinen bir verinin "SQL Redo" (yapılan işlem) ve "SQL Undo" (işlemi geri alma) kodlarını üretmesidir.
+
+### LogMiner Başlatma Adımları
+```sql
+-- 1. Analiz edilecek log dosyasını ekle
+BEGIN
+  DBMS_LOGMNR.ADD_LOGFILE(
+    LOGFILENAME => '/u01/app/oracle/oradata/arch/1_123_456.dbf',
+    OPTIONS => DBMS_LOGMNR.NEW);
+END;
+/
+
+-- 2. LogMiner'ı başlat
+BEGIN
+  DBMS_LOGMNR.START_LOGMNR(
+    OPTIONS => DBMS_LOGMNR.DICT_FROM_ONLINE_CATALOG);
+END;
+/
+```
+
+### Değişiklikleri Sorgulama
+```sql
+SELECT scn, timestamp, session#, sql_redo, sql_undo
+FROM V$LOGMNR_CONTENTS
+WHERE table_name = 'MUSTERI_BILGILERI'
+ORDER BY timestamp DESC;
+```
+
+---
+
+## 2. DBMS_METADATA ile DDL Alma
+
+Bazen bir tablonun, indexin veya görünümün (view) tam oluşturma scriptine ihtiyaç duyarsınız. `DBMS_METADATA.GET_DDL` fonksiyonu, veritabanı sözlüğünden bu bilgiyi anında üretir.
+
+```sql
+SET LONG 2000000
+SET PAGESIZE 0
+SET FEEDBACK OFF
+
+-- Bir tablonun DDL'ini al
+SELECT DBMS_METADATA.GET_DDL('TABLE', 'EMPLOYEES', 'HR') FROM DUAL;
+
+-- Bir kullanıcının tüm yetkilerini ve rollerini al
+SELECT DBMS_METADATA.GET_GRANTED_DDL('ROLE_GRANT', 'SCOTT') FROM DUAL;
+```
+
+---
+
+## 3. ORADEBUG: Derinlemesine Süreç İzleme
+
+`ORADEBUG`, veritabanı çekirdek süreçlerine (background processes) müdahale etmek ve detaylı trace almak için kullanılan dökümante edilmemiş (undocumented) ancak efsanevi bir araçtır.
+
+```bash
+sqlplus / as sysdba
+SQL> ORADEBUG SETMYPID;              -- Kendi oturumunu hedef seç
+SQL> ORADEBUG UNLIMIT;               -- Trace dosyası boyut limitini kaldır
+SQL> ORADEBUG DUMP ERRORSTACK 3;     -- Mevcut hataların detaylı dökümünü al
+SQL> ORADEBUG TRACEFILE_NAME;        -- Trace dosyasının yolunu göster
+```
+
+## Özet ve Güvenlik İpuçları
+
+-   **LogMiner Kaynak Tüketimi:** LogMiner yoğun sistemlerde kaynak tüketebilir, bu nedenle analizleri mümkünse bir `STANDBY` veya `TEST` sunucusunda yapın.
+-   **Supplemental Logging:** LogMiner'da kolon değerlerini görebilmek için veritabanında `SUPPLEMENTAL LOG` özelliğinin açık olması gerekir.
+    `ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;`
+-   **ORADEBUG Dikkat:** `ORADEBUG` komutları sistemi askıya alabilir veya crash edebilir. Sadece ne yaptığınızdan eminseniz kullanın.
+
+Bu gelişmiş araçlar, veritabanındaki "görünmez" detayları gün yüzüne çıkararak, en zorlu sorunları bile saniyeler içinde çözmenizi sağlar.

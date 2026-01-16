@@ -1,0 +1,97 @@
+---
+title: "Oracle DBA İpuçları: Gizli Parametreler, Veri Kurtarma ve Kurtarıcı Sorgular"
+description: "Oracle veritabanında az bilinen gizli (hidden) parametreler, yedeksiz kayıp veri dosyası kurtarma senaryosu ve günlük hayatta hayat kurtaran DBA scriptleri."
+date: "2026-01-16"
+category: "Tanılama"
+tags: ["Oracle", "Troubleshooting", "Data Recovery", "Hidden Parameters", "DBA Tips"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle DBA İpuçları: Gizli Scriptler ve Kurtarma Senaryoları
+
+Bir veritabanı yöneticisinin alet çantasında her zaman dökümante edilmemiş veya nadir ihtiyaç duyulan ama hayat kurtaran scriptler bulunmalıdır. Bu makalede, gizli parametrelerden, yedek olmadan veri dosyası kurtarma senaryosuna kadar bir dizi pratik bilgiyi derledik.
+
+
+<!--truncate-->
+## 1. Gizli (Hidden) Parametreleri Sorgulama
+
+Oracle'da alt çizgi (_) ile başlayan parametreler dökümante edilmemiştir ve sadece özel durumlarda (genellikle Oracle Support tavsiyesiyle) değiştirilmelidir. Mevcut gizli parametreleri görmek için:
+
+```sql
+SELECT
+  a.ksppinm  AS parameter_name,
+  b.ksppstvl AS value,
+  b.ksppstdf AS is_default,
+  a.ksppdesc AS description
+FROM x$ksppi a, x$ksppcv b
+WHERE a.indx = b.indx
+  AND a.ksppinm LIKE '/_%' ESCAPE '/'
+ORDER BY 1;
+```
+
+---
+
+## 2. Senaryo: Datafile Kaybı (Yedek Yok, Arşiv Var)
+
+Eğer bir veri dosyasını (datafile) fiziksel olarak kaybederseniz ve RMAN yedeğiniz yoksa, ancak veritabanı `ARCHIVELOG` modundaysa ve elinizde dosyanın oluşturulmasından itibaren tüm arşivler varsa, dosyayı kurtarabilirsiniz.
+
+**Kurtarma Adımları:**
+```sql
+-- 1. Hatalı dosyayı offline yapın
+ALTER DATABASE DATAFILE 7 OFFLINE;
+
+-- 2. Dosyayı yeniden oluşturun (İsim aynı kalabilir)
+ALTER DATABASE CREATE DATAFILE '/u01/oradata/data01.dbf';
+
+-- 3. Arşiv logları kullanarak dosyayı ileri sarın (Recover)
+RECOVER DATAFILE 7;
+
+-- 4. Dosyayı online yapın
+ALTER DATABASE DATAFILE 7 ONLINE;
+```
+
+---
+
+## 3. SQL İle Dosya Transferi (DBMS_FILE_TRANSFER)
+
+Veritabanı dblink'leri üzerinden bir veri dosyasını veya herhangi bir dosyayı bir sunucudan diğerine taşımak için bu paketi kullanabilirsiniz.
+
+```sql
+BEGIN
+  DBMS_FILE_TRANSFER.GET_FILE(
+    source_directory_object      => 'SOURCE_DIR',
+    source_file_name             => 'datafile01.dbf',
+    source_database              => 'REMOTE_DB_LINK',
+    destination_directory_object => 'DEST_DIR',
+    destination_file_name        => 'datafile01_copy.dbf'
+  );
+END;
+/
+```
+
+---
+
+## 4. Kayıp Bloktan Objeyi Bulma
+
+Eğer veritabanı loglarında bir blok bozulması (Block Corruption) alırsanız, o bloğun hangi tabloya ait olduğunu bulmak için:
+
+```sql
+SELECT owner, segment_name, segment_type 
+FROM dba_extents 
+WHERE file_id = &file_id 
+  AND &block_id BETWEEN block_id AND block_id + blocks - 1;
+```
+
+---
+
+## 5. Pratik İpuçları (Sıkıştırılmış Notlar)
+
+-   **Hangi Kullanıcı Ne Zaman İşlem Yaptı?** `v$sql` ve `v$session` üzerinden bulamadığınız geçmiş DML zamanlarını `ORA_ROWSCN` fonksiyonuyla yaklaşık olarak bulabilirsiniz:
+    `SELECT SCN_TO_TIMESTAMP(MAX(ORA_ROWSCN)) FROM table_name;`
+-   **Recyclebin Kapatma:** Çok yoğun tablo oluşturup silen sistemlerde temizlik yükünü azaltmak için:
+    `ALTER SYSTEM SET recyclebin = OFF SCOPE=BOTH;`
+-   **DB Vault Sorunları:** Eğer bir kullanıcı oluştururken "insufficient privileges" alıyorsanız ve DBA yetkiniz varsa, sistemde **Database Vault** açık olabilir. Kontrol edin ve gerekirse geçici olarak devre dışı bırakın.
+
+## Özet
+
+DBA'lik tecrübesi, karşılaşılan her sorunu bir not defterine (veya bir bloga!) kaydetmekle gelişir. Bu küçük ipuçları, büyük kriz anlarında sükunetinizi korumanızı ve sorunu hızla çözmenizi sağlar.

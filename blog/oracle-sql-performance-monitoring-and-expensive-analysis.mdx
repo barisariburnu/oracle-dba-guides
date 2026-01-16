@@ -1,0 +1,139 @@
+---
+title: "Oracle SQL Performans İzleme: En Maliyetli Sorguların Tespiti"
+description: "Oracle veritabanında yüksek CPU, I/O ve memory (Buffer Gets) tüketen SQL sorgularını analiz etme, v$sqlstats ve SQL Monitor ile performans tuning rehberi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle SQL Performance", "v$sqlstats", "SQL Monitor", "CPU Tuning", "I/O Analysis", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Performans İzleme: En Maliyetli Sorguları Bulma
+
+Veritabanı performansının %80'i, veritabanı üzerinde koşan SQL sorgularının verimliliği ile doğrudan ilişkilidir. Tek bir kötü yazılmış sorgu, tüm sistem kaynaklarını (CPU ve Disk I/O) tüketerek diğer kullanıcıların beklemesine neden olabilir. Bir Oracle DBA olarak en temel görevlerimizden biri, bu "maliyetli" (expensive) sorguları proaktif olarak tespit etmek ve optimize etmektir. Bu makalede, Oracle'ın sunduğu dinamik performans görünümlerini (V$) kullanarak sistemdeki darboğazları nasıl bulacağınızı inceleyeceğiz.
+
+
+<!--truncate-->
+## Temel Performans Metrikleri
+
+SQL analizine başlamadan önce şu üç temel metriği anlamamız gerekir:
+1.  **Disk Reads (Physical I/O):** Verinin diskten okunması. En yavaş işlemdir.
+2.  **Buffer Gets (Logical I/O):** Verinin hafızadan (Buffer Cache) okunması. Diske göre çok hızlıdır ancak aşırı olması CPU tüketir.
+3.  **CPU Time:** Sorgunun işlemci üzerinde harcadığı süre.
+
+---
+
+## 1. En Yüksek Disk I/O Yapan SQL'ler
+
+Sistemi en çok yoran, disk darboğazına neden olan ilk 5 sorguyu bulmak için:
+
+```sql
+SELECT sql_text, 
+       disk_reads, 
+       buffer_gets, 
+       cpu_time/1000000 AS cpu_sec,
+       elapsed_time/1000000 AS elapsed_sec
+FROM (
+    SELECT sql_text, buffer_gets, disk_reads, cpu_time, elapsed_time
+    FROM v$sqlstats
+    ORDER BY disk_reads DESC
+)
+WHERE rownum <= 5;
+```
+
+<Callout type="info">
+`v$sqlstats` görünümü, `v$sql`'e göre daha performanslıdır ve SQL bellekte (Shared Pool) olmasa bile bazı özet bilgileri saklamaya devam eder.
+</Callout>
+
+---
+
+## 2. Şema (Uygulama) Bazlı Performans Analizi
+
+Sadece belirli bir uygulamanın (şemanın) en maliyetli sorgularını listelemek:
+
+```sql
+SELECT parsing_schema_name, 
+       sql_id, 
+       disk_reads, 
+       buffer_gets, 
+       elapsed_time/1000000 AS elapsed_sec,
+       sql_text
+FROM v$sql
+WHERE parsing_schema_name = 'MUHASEBE_USER'
+ORDER BY disk_reads DESC
+FETCH FIRST 5 ROWS ONLY;
+```
+
+---
+
+## 3. Real-Time SQL Monitoring (SQL Monitor)
+
+Oracle 11g ile gelen **SQL Monitor** özelliği, paralel sorguları veya 5 saniyeden uzun süren sorguları otomatik olarak izlemeye başlar. Şu an aktif olarak CPU tüketen sorguları görmek için:
+
+```sql
+SELECT sid, 
+       status, 
+       sql_id,
+       buffer_gets, 
+       disk_reads, 
+       ROUND(cpu_time/1000000, 1) AS cpu_sec,
+       sql_text
+FROM v$sql_monitor
+WHERE status = 'EXECUTING'
+ORDER BY cpu_time DESC;
+```
+
+---
+
+## 4. AWR ile Geçmiş Performans Analizi
+
+Eğer sorun dün yaşandıysa veya sistemin genel trendini görmek istiyorsanız, AWR (Automatic Workload Repository) tablolarına bakmalısınız:
+
+```sql
+SELECT sql_id, 
+       SUM(disk_reads_delta) AS total_disk_reads,
+       SUM(executions_delta) AS total_execs,
+       SUM(cpu_time_delta) / 1000000 AS total_cpu_sec
+FROM dba_hist_sqlstat
+WHERE snap_id BETWEEN 12000 AND 12100 -- İlgili snapshot aralığı
+GROUP BY sql_id
+ORDER BY total_disk_reads DESC
+FETCH FIRST 5 ROWS ONLY;
+```
+
+---
+
+## 5. Günlük "En Meşgul" SQL Raporu
+
+Bugün içerisinde en çok CPU ve Bellek tüketen ilk 20 sorguyu detaylı raporlama:
+
+```sql
+SELECT * FROM (
+    SELECT parsing_schema_name AS "Owner",
+           executions AS "Adet",
+           rows_processed AS "Satır_Sayısı",
+           ROUND(cpu_time / executions) AS "Cpu_Per_Exec",
+           ROUND(buffer_gets / executions) AS "Memory_Per_Exec",
+           ROUND(disk_reads / executions) AS "Disk_Per_Exec",
+           (elapsed_time / executions) / 1000000 AS "Sec_Per_Exec",
+           sql_text
+    FROM v$sql
+    WHERE executions > 0
+      AND TRUNC(last_active_time) = TRUNC(SYSDATE)
+    ORDER BY "Cpu_Per_Exec" DESC
+)
+WHERE rownum <= 20;
+```
+
+---
+
+## Analiz ve Çözüm Adımları
+
+Raporda bir sorgu tespit ettikten sonra şu adımları izleyin:
+
+1.  **Plan Kontrolü:** Sorgunun `EXPLAIN PLAN`'ına bakın. "Full Table Scan" mı yapıyor yoksa index mi kullanıyor?
+2.  **I/O Oranı:** `Disk Reads / Buffer Gets` oranı yüksekse, veriler belleğe sığmıyor veya indexler yetersiz demektir.
+3.  **Hatalı İstatistikler:** Tablo istatistikleri eskiyse CBO yanlış plan seçmiş olabilir. İstatistikleri güncelleyin:
+    `EXEC DBMS_STATS.GATHER_TABLE_STATS('OWNER', 'TABLE_NAME');`
+4.  **SQL Tuning Advisor:** Karmaşık sorgular için Oracle'ın kendi Advisor aracını çalıştırarak öneri alın.
+
+SQL performans izleme, bir "yangın söndürme" operasyonu değil, veritabanı sağlığı için düzenli yapılması gereken bir check-up işlemidir.

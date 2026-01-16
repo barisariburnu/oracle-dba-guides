@@ -1,0 +1,94 @@
+---
+title: "Oracle AWR Plan Statistics: SQL Plan Değişimlerini İzleme ve Karşılaştırma"
+description: "Oracle veritabanında AWR verileri ile execution plan performansını analiz etme, Plan Hash Value bazlı CPU ve I/O karşılaştırma rehberi."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle AWR", "Plan Hash Value", "Execution Plan", "Performance Stats", "DBA", "SQL Tuning"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle AWR Plan Statistics: Plan Değişimlerinin Performans Etkisi
+
+Oracle Optimizer (CBO), veriler değiştikçe veya istatistikler güncellendikçe bir SQL için farklı çalışma yolları (Execution Plan) seçebilir. Ancak her plan değişikliği performans artışı getirmez; bazen yeni bir plan, sorgunun saniyelerden dakikalara çıkmasına neden olabilir. Bu durumu analiz etmenin en iyi yolu, AWR geçmişindeki **Plan Hash Value (PHV)** verilerini karşılaştırmaktır. Bu makalede, bir SQL'in farklı planlarının performansını nasıl ölçeceğinizi inceleyeceğiz.
+
+
+<!--truncate-->
+## Neden Plan Bazlı Analiz Yapmalıyız?
+
+Bir `SQL_ID` aynı olsa bile, farklı zamanlarda farklı `Plan Hash Value`lar ile çalışmış olabilir. Örneğin:
+- **Plan A (PHV: 12345):** Index kullanıyor, 0.5 saniye sürüyor.
+- **Plan B (PHV: 67890):** Full Table Scan yapıyor, 10 saniye sürüyor.
+
+Sadece `SQL_ID` bazlı ortalamaya bakarsanız, sorunun gerçek nedenini (plan değişimini) göremezsiniz.
+
+---
+
+## AWR Üzerinden Plan Karşılaştırma Sorgusu
+
+Aşağıdaki sorgu, belirli bir SQL ID için AWR'de (geçmiş 8+ gün) kayıtlı tüm planları ve bunların ortalama performans metriklerini döner:
+
+```sql
+SELECT sql_id, 
+       plan_hash_value, 
+       SUM(execs) AS total_execs, 
+       ROUND(SUM(etime)/SUM(DECODE(execs,0,1,execs)), 3) AS avg_etime_sec, 
+       ROUND(SUM(cpu_time)/SUM(DECODE(execs,0,1,execs)), 3) AS avg_cpu_sec,
+       ROUND(SUM(lio)/SUM(DECODE(execs,0,1,execs)), 0) AS avg_lio_gets
+FROM (
+    SELECT s.snap_id, 
+           s.sql_id, 
+           s.plan_hash_value,
+           nvl(s.executions_delta,0) AS execs,
+           s.elapsed_time_delta/1000000 AS etime,
+           s.buffer_gets_delta AS lio,
+           s.cpu_time_delta/1000000 AS cpu_time
+    FROM dba_hist_sqlstat s
+    JOIN dba_hist_snapshot ss ON s.snap_id = ss.snap_id 
+                             AND s.instance_number = ss.instance_number
+    WHERE s.sql_id = '&target_sql_id'
+)
+GROUP BY sql_id, plan_hash_value
+ORDER BY avg_etime_sec;
+```
+
+---
+
+## Raporu Yorumlama
+
+Çıkan sonuçlarda şu sütunlara odaklanın:
+
+1.  **avg_etime_sec:** Sorgunun ortalama çalışma süresi. Planlar arasındaki fark bariz mi?
+2.  **avg_lio_gets:** Mantıksal okuma (Logical I/O) sayısı. Eğer bir planın LIO değeri diğerinden 100 kat fazlaysa, o plan muhtemelen inefficient bir join veya full scan yapıyordur.
+3.  **total_execs:** Bu plan ne kadar sık kullanılmış? Bazen çok nadir kullanılan bir plan sistemi kilitliyor olabilir.
+
+---
+
+## Plan Kararlılığını Sağlama
+
+Eğer analiz sonucunda "iyi" ve "kötü" planları netleştirdiyseniz, bir sonraki adım sistemin her zaman "iyi" olanı kullanmasını garanti altına almaktır.
+
+### En İyi Planı Sabitleme (SQL Plan Baseline)
+SQL Plan Management (SPM) kullanarak, veritabanına sadece tercih ettiğiniz planı kullanmasını söyleyebilirsiniz:
+
+```sql
+DECLARE
+  l_plans_loaded PLS_INTEGER;
+BEGIN
+  l_plans_loaded := DBMS_SPM.LOAD_PLANS_FROM_CURSOR_CACHE(
+    sql_id          => '&target_sql_id',
+    plan_hash_value => &best_plan_hash_value,
+    fixed           => 'YES'
+  );
+END;
+/
+```
+
+---
+
+## Özet ve Aksiyon Planı
+
+-   **Haftalık Kontrol:** En maliyetli 10 SQL'iniz için birden fazla `Plan Hash Value` oluşup oluşmadığını kontrol edin.
+-   **İstatistik Etkisi:** Plan değişikliği genellikle `GATHER_TABLE_STATS` sonrası olur. İstatistik toplama sıklığınızı ve metodunuzu (Auto Sample Size vb.) gözden geçirin.
+-   **Bind Variable:** Farklı bind variable değerleri farklı planlara neden olabilir (Bind Peek). Histogramların doğruluğunu kontrol edin.
+
+AWR plan istatistikleri, veritabanı performansındaki "nedensiz" yavaşlamaların arkasındaki gerçek suçluyu (plan değişikliğini) bulmak için en güçlü silahtır.

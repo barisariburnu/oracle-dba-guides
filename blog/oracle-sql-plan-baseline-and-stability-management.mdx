@@ -1,0 +1,117 @@
+---
+title: "Oracle SQL Plan Baseline: Performans Regressions ve Plan Stabilitesi"
+description: "Oracle veritabanında execution plan değişimlerini engelleme, SQL Plan Baseline kullanımı, upgrade sırasında performans koruma ve plan evolve teknikleri."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle Baseline", "SQL Plan Stability", "Performance Regressions", "Execution Plan", "Database Upgrade", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle SQL Plan Baseline ile Performans Regressions Engelleme
+
+Oracle veritabanında versiyon yükseltme (upgrade), yama yükleme veya istatistik güncelleme sonrası en büyük korku, çalışan SQL'lerin planlarının değişmesi ve performansın düşmesidir (Performance Regression). **SQL Plan Baseline**, bu riski minimize etmek için Oracle 11g ile gelen ve plan stabilitesini garanti altına alan bir mekanizmadır. Bu makalede, iyi çalışan planları nasıl sabitleyeceğinizi ve upgrade sırasında bunları nasıl koruyacağınızı detaylandıracağız.
+
+
+<!--truncate-->
+## SQL Plan Baseline Nedir?
+
+SQL Plan Baseline, Optimizer'ın (CBO) sadece "doğrulanmış ve kabul edilmiş" planları kullanmasını sağlayan bir yapıdır. Bir SQL için birden fazla plan oluşsa bile, Oracle sadece baseline'da işaretli (Accepted) olanı seçer. Yeni bir plan oluştuğunda, bu plan otomatik olarak "Non-Accepted" olarak işaretlenir ve DBA tarafından onaylanana (Evolve) kadar kullanılmaz.
+
+---
+
+## SQL Plan Baseline Oluşturma Yöntemleri
+
+### 1. Bellekteki (Cursor Cache) Plana Baseline Oluşturma
+Hali hazırda iyi çalıştığını bildiğiniz bir `SQL_ID` için planı dondurmak:
+
+```sql
+DECLARE
+  l_plans_loaded PLS_INTEGER;
+BEGIN
+  l_plans_loaded := DBMS_SPM.LOAD_PLANS_FROM_CURSOR_CACHE(
+    sql_id => '5xqm3n6t5k8b2',
+    fixed  => 'YES' -- Planı kesin olarak sabitle
+  );
+END;
+/
+```
+
+### 2. Otomatik Yakalama (Capture)
+Tüm sistemdeki SQL'ler için baseline oluşturmak (Riskli olabilir, yüksek alan kaplar):
+```sql
+ALTER SYSTEM SET optimizer_capture_sql_plan_baselines = TRUE;
+```
+
+---
+
+## Upgrade Sırasında Plan Koruma (10g -&gt; 11g/12c/19c)
+
+Upgrade sonrası performans kaybını önlemek için 10g'deki planları 11g+ sürümüne taşımak kritik bir DBA görevidir.
+
+### Adım 1: SQL Tuning Set (STS) Oluşturma (Kaynak Veritabanında)
+```sql
+EXEC DBMS_SQLTUNE.CREATE_SQLSET('upgrade_sql_set');
+EXEC DBMS_SQLTUNE.CAPTURE_CURSOR_CACHE_SQLSET('upgrade_sql_set', 3600); -- 1 saatlik toplama
+```
+
+### Adım 2: Staging Tablo ile Paketleme
+```sql
+EXEC DBMS_SQLTUNE.CREATE_STGTAB_SQLSET('STS_STAGING_TAB');
+EXEC DBMS_SQLTUNE.PACK_STGTAB_SQLSET('upgrade_sql_set', 'SYS', 'STS_STAGING_TAB');
+```
+
+### Adım 3: Taşıma ve Yükleme (Hedef Veritabanında)
+Staging tablosunu Data Pump ile yeni sisteme taşıdıktan sonra:
+```sql
+EXEC DBMS_SQLTUNE.UNPACK_STGTAB_SQLSET('upgrade_sql_set', '%', TRUE, 'STS_STAGING_TAB');
+
+-- Planları Baseline'a aktar
+DECLARE
+  l_plans PLS_INTEGER;
+BEGIN
+  l_plans := DBMS_SPM.LOAD_PLANS_FROM_SQLSET('upgrade_sql_set');
+END;
+/
+```
+
+---
+
+## SQL Plan Baseline İzleme ve Yönetimi
+
+Sistemdeki baseline'ları ve durumlarını kontrol etmek için:
+
+```sql
+SELECT sql_handle, plan_name, enabled, accepted, fixed, last_executed
+FROM dba_sql_plan_baselines
+WHERE sql_text LIKE '%tablo_adi%';
+```
+
+### Plan Evolve (Geliştirme)
+Yeni oluşan bir planın, eskiden daha iyi olup olmadığını test edip kabul etmek:
+
+```sql
+SET LONG 10000
+SELECT DBMS_SPM.EVOLVE_SQL_PLAN_BASELINE(sql_handle => 'SQL_2da79857640237da') FROM DUAL;
+```
+
+### Baseline Silme
+Gerekli olmayan baseline'ları temizlemek alan tasarrufu sağlar:
+```sql
+DECLARE
+  l_plans PLS_INTEGER;
+BEGIN
+  l_plans := DBMS_SPM.DROP_SQL_PLAN_BASELINE(sql_handle => 'SQL_2da79857640237da');
+END;
+/
+```
+
+---
+
+## Özet ve Best Practices
+
+1.  **Fixed vs Normal:** Kritik SQL'ler için `FIXED => 'YES'` kullanın. Bu, Optimizer'ın yeni planları değerlendirmesini bile engeller.
+2.  **Upgrade Öncesi:** Mutlaka en önemli 50-100 SQL'iniz için STS oluşturun ve yeni sisteme baseline olarak aktarın.
+3.  **Space Management:** Baseline'lar `SYSAUX` tablespace'inde yer tutar. Gereksiz veya hiç kullanılmayan baseline'ları temizleyin.
+4.  **Evolve İşlemi:** Evolve işlemini manuel yapın ve raporu dikkatli okuyun. Oracle, yeni planın eskiden en az 1.5 kat daha hızlı olduğunu kanıtlarsa kabul etmenizi önerir.
+
+SQL Plan Baseline, kontrol dışı plan değişimlerine karşı veritabanı yöneticisinin elindeki en güçlü sigortadır. Üretim sistemlerinde "çalışıyorsa dokunma" prensibini teknik olarak garanti altına almanızı sağlar.

@@ -1,0 +1,113 @@
+---
+title: "Oracle Audit Yapılandırması ve Güvenlik Denetimi"
+description: "Veritabanı güvenliği için kritik DDL, DML ve sistem operasyonlarını izleme, kullanıcı aktivitelerini audit etme ve audit trail yönetimi rehberi."
+date: 2026-01-16
+category: "Oracle Güvenlik"
+tags: ["oracle", "audit", "security", "database auditing", "ddl monitoring", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Audit Yapılandırması ve Güvenlik Denetimi
+
+Oracle veritabanında "kim, ne zaman, hangi işlemi yaptı?" sorusuna yanıt bulabilmek için Audit (Denetim) mekanizmasını doğru yapılandırmak gerekir. Özellikle finansal veriler, kullanıcı yetkilendirmeleri ve sistem parametre değişiklikleri gibi kritik alanlarda denetim, hem güvenlik hem de uyumluluk (compliance) için zorunludur.
+
+
+<!--truncate-->
+## Audit Türleri ve Önkoşullar
+
+Oracle'da denetimin aktif olabilmesi için `AUDIT_TRAIL` parametresinin ayarlanması gerekir:
+
+- **DB:** Kayıtlar veritabanı içindeki `SYS.AUD$` tablosunda tutulur.
+- **OS:** Kayıtlar işletim sistemi seviyesinde log dosyalarında tutulur.
+- **XML:** Kayıtlar XML formatında işletim sisteminde tutulur.
+
+```sql
+-- Mevcut durumu kontrol edin
+SHOW PARAMETER audit_trail;
+
+-- Aktifleştirmek için (restart gerektirir)
+ALTER SYSTEM SET audit_trail=DB SCOPE=SPFILE;
+```
+
+## Kritik Operasyonların Denetlenmesi
+
+Aşağıdaki komutlar ile kritik sistem ve kullanıcı operasyonlarını denetim altına alabilirsiniz.
+
+### 1. DDL ve Sistem Operasyonları
+
+```sql
+AUDIT ALTER ANY TABLE BY ACCESS;
+AUDIT ALTER SYSTEM BY ACCESS;
+AUDIT ALTER DATABASE BY ACCESS;
+AUDIT CREATE ANY DIRECTORY BY ACCESS;
+AUDIT DROP ANY DIRECTORY BY ACCESS;
+AUDIT CREATE ANY PROCEDURE BY ACCESS;
+AUDIT DROP ANY PROCEDURE BY ACCESS;
+```
+
+### 2. Kullanıcı Giriş/Çıkış Takibi (Logon/Logoff)
+
+Bir kullanıcının ne zaman bağlandığını ve ne kadar süre kaldığını izlemek için:
+
+```sql
+AUDIT SESSION BY ACCESS;
+-- Veya belirli bir kullanıcı için
+AUDIT SESSION BY scott;
+```
+
+## Audit Kayıtlarını Analiz Etme
+
+Denetim kayıtlarını `DBA_AUDIT_TRAIL` view'i üzerinden sorgulayabilirsiniz.
+
+```sql
+SELECT username,
+       terminal,
+       TO_CHAR(timestamp, 'DD-MM-YYYY HH24:MI:SS') AS action_time,
+       owner,
+       obj_name,
+       action_name
+FROM dba_audit_trail
+WHERE timestamp > SYSDATE - 1
+ORDER BY timestamp DESC;
+```
+
+<Callout type="info" title="İpucu">
+`ACTION_NAME` sütunu, yapılan işlemin ne olduğunu (LOGON, LOGOFF, CREATE TABLE, GRANT vb.) gösterir.
+</Callout>
+
+## Audit Trail Yönetimi ve Temizlik
+
+Audit tablosu (`SYS.AUD$`) her işlemde büyür ve `SYSTEM` tablespace'inde yer kaplar. Bu tablonun düzenli olarak temizlenmesi performans ve depolama açısından kritiktir.
+
+### Manuel Temizlik Job'ı
+
+```sql
+BEGIN
+  -- 30 günden eski kayıtları temizle
+  DBMS_AUDIT_MGMT.CLEAN_AUDIT_TRAIL(
+    audit_trail_type        => DBMS_AUDIT_MGMT.AUDIT_TRAIL_ALL,
+    use_last_arch_timestamp => FALSE
+  );
+END;
+/
+```
+
+<Callout type="warning" title="Önemli Uyarı">
+Audit tablosunun aşırı büyümesi veritabanı performansını (özellikle logon/logoff hızını) etkileyebilir. Temizlik işlemlerini mutlaka bir `DBMS_SCHEDULER` job'ına bağlayın.
+</Callout>
+
+## Kullanım Senaryosu: DDL İzleme Raporu
+
+Günde bir kez çalıştırılarak yönetici dışındaki kullanıcıların yaptığı DDL işlemlerini raporlamak:
+
+```sql
+SELECT username, obj_name, action_name, timestamp
+FROM dba_audit_trail
+WHERE action_name IN ('CREATE TABLE', 'DROP TABLE', 'ALTER TABLE')
+  AND username NOT IN ('SYS', 'SYSTEM', 'DBA_ADMIN')
+ORDER BY timestamp DESC;
+```
+
+## Sonuç
+
+Doğru yapılandırılmış bir audit stratejisi, sadece bir güvenlik gerekliliği değil, aynı zamanda operasyonel hataların analizinde (örneğin yanlışlıkla silinen bir tabloyu kimin sildiğini bulmak gibi) hayat kurtarıcıdır. Ancak, her şeyi denetlemek (Audit All) performansı düşüreceği için sadece "Kritik" ve "Şüpheli" işlemleri denetlemek en iyi uygulamadır.

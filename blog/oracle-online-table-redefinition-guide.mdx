@@ -1,0 +1,96 @@
+---
+title: "Oracle Online Table Redefinition (DBMS_REDEFINITION) ile Tablo Partisyonlama"
+description: "Oracle'da non-partitioned bir tabloyu çalışma anında (kesinti olmadan) partitioned bir tabloya dönüştürme, DBMS_REDEFINITION paketi adımları ve veri senkronizasyonu."
+date: "2026-01-16"
+category: "Performans"
+tags: ["Oracle DBMS_REDEFINITION", "Partitioning", "Online Operation", "Table Transformation", "DBA", "Database Performance"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Online Table Redefinition (DBMS_REDEFINITION) ile Tablo Partisyonlama
+
+Veritabanı büyüdükçe, başlangıçta standart olarak oluşturulan tablolar performans dar boğazı oluşturmaya başlar. Bu tabloları partisyonlu (partitioned) hale getirmek şarttır; ancak canlı bir sistemde tabloyu "drop-create" yapmak servis kesintisine yol açar. Oracle **DBMS_REDEFINITION** paketi, bir tabloyu arka planda yeniden yapılandırırken aynı zamanda canlı veriyi senkronize ederek, işlemi neredeyse sıfır kesinti ile tamamlamanıza olanak tanır. Bu makalede, büyük bir tabloyu online olarak nasıl partisyonlu hale getireceğimizi inceleyeceğiz.
+
+
+<!--truncate-->
+## 1. Hazırlık ve Geçici (Interim) Tablo Oluşturma
+
+İlk olarak, mevcut tablonuzun (Original Table) hedeflediğiniz partisyon yapısına sahip bir kopyasını (Interim Table) oluşturun.
+
+```sql
+-- Mevcut Tablo: ARC_IN_RATED_CDR
+-- Geçici Tablo: ARC_IN_RATED_CDR_RD (Partisyonlu yapı ile)
+CREATE TABLE BILLING_USER.ARC_IN_RATED_CDR_RD (
+    CDR_ID NUMBER,
+    ARAMA_ZAMANI TIMESTAMP,
+    -- diğer kolonlar...
+)
+PARTITION BY LIST (DONEM) (
+    PARTITION DP_202301 VALUES (202301) TABLESPACE DATA_202301,
+    PARTITION DP_202302 VALUES (202302) TABLESPACE DATA_202302
+);
+```
+
+---
+
+## 2. Redefinition İşlemini Başlatma
+
+Veritabanına işlemin başlayacağını ve verilerin kopyalanacağını bildiriyoruz.
+
+```sql
+BEGIN
+  DBMS_REDEFINITION.START_REDEF_TABLE (
+    uname       => 'BILLING_USER',
+    orig_table  => 'ARC_IN_RATED_CDR',
+    int_table   => 'ARC_IN_RATED_CDR_RD',
+    options_flag => DBMS_REDEFINITION.CONS_USE_ROWID -- Primary Key yoksa RowID kullanılabilir
+  );
+END;
+/
+```
+
+---
+
+## 3. Bağımlı Nesneleri Kopyalama (Indexes, Constraints, Triggers)
+
+Orijinal tablo üzerindeki index, kısıtlama (constraint) ve trigger'ları hedef tabloya otomatik olarak kopyalarız:
+
+```sql
+DECLARE
+  v_errors PLS_INTEGER;
+BEGIN
+  DBMS_REDEFINITION.COPY_TABLE_DEPENDENTS (
+    uname            => 'BILLING_USER',
+    orig_table       => 'ARC_IN_RATED_CDR',
+    int_table        => 'ARC_IN_RATED_CDR_RD',
+    copy_indexes     => 1,
+    copy_triggers    => TRUE,
+    copy_constraints => TRUE,
+    ignore_errors    => TRUE,
+    num_errors       => v_errors
+  );
+END;
+/
+```
+
+---
+
+## 4. Veri Senkronizasyonu ve İşlemi Tamamlama
+
+Kopyalama işlemi uzun sürdüyse, o sırada orijinal tabloya gelen yeni verileri senkronize etmek için `SYNC_INTERIM_TABLE` kullanılabilir. Son adımda isimleri takas ederek (`exchange`) işlemi bitiriyoruz.
+
+```sql
+-- Opsiyonel: Senkronizasyon
+EXEC DBMS_REDEFINITION.SYNC_INTERIM_TABLE('BILLING_USER', 'ARC_IN_RATED_CDR', 'ARC_IN_RATED_CDR_RD');
+
+-- Bitiş: İsimler takas edilir, tablo artık partisyonludur.
+EXEC DBMS_REDEFINITION.FINISH_REDEF_TABLE('BILLING_USER', 'ARC_IN_RATED_CDR', 'ARC_IN_RATED_CDR_RD');
+```
+
+## Özet ve Dikkat Edilmesi Gerekenler
+
+-   **Alan Gereksinimi:** İşlem sırasında tablonun iki kopyası (eski ve yeni) veritabanında yer kaplar. Yeterli disk alanınız olduğundan emin olun.
+-   **Lock Süresi:** `FINISH_REDEF_TABLE` komutu çalışırken çok kısa bir süre için tablo kilitlenir. Bu süre genellikle saniyeler mertebesindedir.
+-   **Hata Durumu:** Eğer işlem bir noktada başarısız olursa, süreci `ABORT_REDEF_TABLE` ile iptal etmelisiniz, yoksa veritabanı kopyalama günlüklerini (log) tutmaya devam eder.
+
+Online redefinition, DBA'ların canlı sistemleri modernize etmek (partisyon ekleme, tablespace değiştirme, kolon silme) için kullandığı en emniyetli yöntemdir.

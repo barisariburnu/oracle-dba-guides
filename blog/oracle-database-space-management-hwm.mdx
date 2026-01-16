@@ -1,0 +1,80 @@
+---
+title: "Oracle Veritabanı Alan Yönetimi: Tablespace İzleme ve High Water Mark (HWM)"
+description: "Oracle veritabanında tablespace doluluk oranlarını izleme, aylık veritabanı büyüme analizi ve High Water Mark (HWM) istatistiklerini raporlama."
+date: "2026-01-16"
+category: "Yönetim"
+tags: ["Oracle", "Space Management", "Tablespace", "High Water Mark", "HWM", "DBA"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Veritabanı Alan Yönetimi ve High Water Mark
+
+Veritabanı yöneticileri için disk alanını yönetmek ve doluluk oranlarını takip etmek günlük bir rutindir. Ancak sadece "ne kadar boş yer var?" sorusu yeterli değildir. Veritabanının ne hızla büyüdüğü ve objelerin "High Water Mark" (HWM) seviyeleri, kapasite planlaması için kritik öneme sahiptir.
+
+
+<!--truncate-->
+Bu makalede, Oracle veritabanında alan yönetimi için kullanabileceğiniz temel sorguları ve HWM analizini inceleyeceğiz.
+
+## 1. Tablespace Doluluk Oranlarını İzleme
+
+Hangi tablespace'in ne kadar dolu olduğunu ve yüzde kaçlık bir kullanım oranına sahip olduğunu görmek için aşağıdaki sorgu idealdir:
+
+```sql
+SELECT Total.name "Tablespace Name",
+       ROUND(total_space, 2) "Total (MB)",
+       ROUND(NVL(total_space - Free_space, 0), 2) "Used (MB)", 
+       ROUND(NVL(Free_space, 0), 2) "Free (MB)",       
+       ROUND((NVL(total_space - Free_space, 0) * 100) / total_space, 1) "Used %"       
+FROM
+  (SELECT tablespace_name, SUM(bytes/1024/1024) Free_Space
+   FROM sys.dba_free_space
+   GROUP BY tablespace_name
+  ) Free,
+  (SELECT b.name, SUM(bytes/1024/1024) TOTAL_SPACE
+   FROM sys.v_$datafile a, sys.v_$tablespace B
+   WHERE a.ts# = b.ts#
+   GROUP BY b.name
+  ) Total
+WHERE Free.Tablespace_name(+) = Total.name
+ORDER BY "Used %" DESC;
+```
+
+---
+
+## 2. Veritabanı Büyüme Trendi
+
+Veritabanının son bir yıl içindeki aylık büyüme hızını takip etmek, disk taleplerinizi önceden öngörmenizi sağlar:
+
+```sql
+SELECT TO_CHAR(creation_time, 'RRRR Month') "Month",
+       SUM(bytes)/1024/1024 "Growth (MB)"
+FROM sys.v_$datafile
+WHERE creation_time > SYSDATE - 365
+GROUP BY TO_CHAR(creation_time, 'RRRR Month')
+ORDER BY MIN(creation_time);
+```
+
+---
+
+## 3. High Water Mark (HWM) İstatistikleri
+
+High Water Mark, bir segmentteki verilerin ulaştığı en yüksek seviyeyi temsil eder. Verileri silseniz bile HWM aşağı inmez (Shrink işlemi gerekir). Veritabanı genelindeki HWM istatistiklerini görmek için:
+
+```sql
+SELECT hwm1.name,
+       hwm1.highwater,
+       hwm1.last_value
+FROM   dba_high_water_mark_statistics hwm1
+WHERE  hwm1.version = (SELECT MAX(hwm2.version)
+                       FROM   dba_high_water_mark_statistics hwm2
+                       WHERE  hwm2.name = hwm1.name)
+ORDER BY hwm1.name;
+```
+
+## Özet ve En İyi Uygulamalar
+
+-   **Kritik Eşik:** Kullanım oranı %90'ı geçen tablespace'ler için alarm sistemleri kurulmalıdır.
+-   **Autoextend:** Veri dosyaları için `AUTOEXTEND` özelliğini kontrollü kullanın; sınırsız büyüme beklenmedik disk doluluklarına (OS seviyesinde) yol açabilir.
+-   **Segment Shrink:** Çok fazla silme işlemi yapılan büyük tablolarda, alanı geri kazanmak için `ALTER TABLE ... SHRINK SPACE` komutunu değerlendirebilirsiniz (HWM seviyesini aşağı çeker).
+
+Doğru alan yönetimi, hem performansı artırır hem de operasyonel sürekliliği garanti eder.

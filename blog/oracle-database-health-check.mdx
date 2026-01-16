@@ -1,0 +1,371 @@
+---
+title: "Oracle Database Health Check ile Instance Monitoring"
+description: "Oracle database instance durumunu, açık modunu, rolünü ve uptime'ını izlemek için kapsamlı health check scripti."
+date: 2026-01-16
+category: "Oracle Monitoring"
+tags: ["oracle", "health check", "instance monitoring", "database status", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Database Health Check ile Instance Monitoring
+
+Oracle veritabanının sağlıklı çalıştığını doğrulamak, her DBA'nın günlük rutininin önemli bir parçasıdır. Bu makalede, database instance'ının temel durum bilgilerini hızlıca kontrol eden kapsamlı bir monitoring scripti sunacağım.
+
+
+<!--truncate-->
+## Database Health Check Önemi
+
+Günlük health check ile şunları sağlayabilirsiniz:
+
+- Veritabanının doğru modda açık olduğunu doğrular
+- Instance uptime'ını takip eder
+- Data Guard rolünü kontrol eder
+- RAC ortamında tüm node'ların durumunu görüntüler
+- Aksilikleri proaktif olarak tespit eder
+
+<Callout type="info" title="Best Practice">
+Her sabah veritabanına bağlanmadan önce bu health check scriptini çalıştırın. Sadece 5 saniyenizi alır ancak potansiyel sorunları önceden tespit etmenizi sağlar.
+</Callout>
+
+## Script Özellikleri
+
+Bu health check scripti şu bilgileri sağlar:
+
+- Hostname ve instance name
+- Database adı ve startup zamanı
+- Open mode (READ WRITE, READ ONLY, MOUNTED)
+- Database status ve database_role
+- RAC ortamında tüm node'ların durumu
+
+## Önkoşullar
+
+- Oracle 10g veya üzeri
+- SYSDBA yetkisi
+- `GV$INSTANCE` ve `GV$DATABASE` view'lerine erişim
+
+## Script İçeriği
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT i.host_name,
+       i.instance_name,
+       d.name,
+       TO_CHAR(i.startup_time, 'DD-MM-YYYY HH24:MI:SS') startup_time,
+       d.open_mode,
+       i.status,
+       d.database_status,
+       d.database_role
+FROM gv$instance i, gv$database d
+WHERE i.inst_id = d.inst_id;
+
+exit
+```
+
+## Çıktı Sütunları
+
+| Sütun | Açıklama | Değerler |
+|-------|----------|----------|
+| **HOST_NAME** | Sunucu hostname'i | server01, server02, vb. |
+| **INSTANCE_NAME** | Instance adı | PROD1, PROD2, vb. |
+| **NAME** | Database adı (DB_NAME) | PROD, TEST, vb. |
+| **STARTUP_TIME** | Instance başlangıç zamanı | DD-MM-YYYY HH24:MI:SS |
+| **OPEN_MODE** | Database açık modu | READ WRITE, READ ONLY, MOUNTED |
+| **STATUS** | Instance durumu | OPEN, MOUNTED |
+| **DATABASE_STATUS** | Database durumu | ACTIVE, SUSPENDED, RESTRICTED |
+| **DATABASE_ROLE** | Database rolü | PRIMARY, PHYSICAL STANDBY, LOGICAL STANDBY |
+
+## Kullanım
+
+```bash
+sqlplus -s / as sysdba @database.sql
+```
+
+## Örnek Çıktı
+
+```
+HOST_NAME      INSTANCE_NAME  NAME   STARTUP_TIME          OPEN_MODE     STATUS  DATABASE_STATUS  DATABASE_ROLE
+-------------- -------------- ------ --------------------- ------------- ------- ---------------- ------------------
+db-server-01   PROD1          PROD   16-01-2026 08:30:15   READ WRITE    OPEN    ACTIVE           PRIMARY
+db-server-02   PROD2          PROD   16-01-2026 08:30:20   READ WRITE    OPEN    ACTIVE           PRIMARY
+```
+
+## Açıklamalar
+
+### OPEN_MODE Değerleri
+
+- **READ WRITE**: Normal üretim modu, okuma ve yazma açık
+- **READ ONLY**: Sadece okuma modu, reporting için kullanılır
+- **MOUNTED**: Mount modunda, datafile'lara erişim kapalı
+- **READ ONLY WITH APPLY**: Active Data Guard modunda
+
+<Callout type="warning" title="Kritik Durum">
+Eğer OPEN_MODE = MOUNTED ise veritabanı normal çalışmıyordur. Kullanıcılar bağlanamaz. Acil olarak nedenini araştırmalısınız.
+</Callout>
+
+### DATABASE_STATUS Değerleri
+
+- **ACTIVE**: Normal çalışıyor
+- **SUSPENDED**: Askıya alınmış
+- **RESTRICTED**: Kısıtlı erişim modunda (sadece özel kullanıcılar)
+
+### DATABASE_ROLE Değerleri
+
+- **PRIMARY**: Ana veritabanı, yazma işlemleri açık
+- **PHYSICAL STANDBY**: Physical standby, Data Guard ile senkronize
+- **LOGICAL STANDBY**: Logical standby, farklı schema yapısı
+- **SNAPSHOT STANDBY**: Snapshot standby, read-write test ortamı
+
+## Gelişmiş Health Check Sorguları
+
+### Instance Uptime Hesaplama
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT i.host_name,
+       i.instance_name,
+       i.startup_time,
+       ROUND(SYSDATE - i.startup_time, 2) AS uptime_days,
+       ROUND((SYSDATE - i.startup_time) * 24, 2) AS uptime_hours,
+       ROUND((SYSDATE - i.startup_time) * 24 * 60, 2) AS uptime_minutes
+FROM gv$instance i
+ORDER BY i.instance_name;
+```
+
+### RAC Node Durumları
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT inst_id,
+       instance_name,
+       host_name,
+       status,
+       startup_time,
+       thread#,
+       archiver
+FROM gv$instance
+ORDER BY inst_id;
+```
+
+### Data Guard Rol Kontrolü
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT d.database_role,
+       d.open_mode,
+       d.protection_mode,
+       d.protection_level,
+       d.dataguard_broker,
+       d.guard_status
+FROM v$database d;
+```
+
+### Active Sessions Kontrolü
+
+```sql
+set linesize 2000
+set pagesize 2000
+
+SELECT COUNT(*) AS active_sessions,
+       SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS truly_active,
+       SUM(CASE WHEN status = 'INACTIVE' THEN 1 ELSE 0 END) AS inactive
+FROM v$session
+WHERE type != 'BACKGROUND';
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Morning Check
+
+Her sabah veritabanına bağlanmadan önce çalıştırın:
+
+```bash
+#!/bin/bash
+# morning_check.sh
+
+date
+echo "=== Database Health Check ==="
+sqlplus -s / as sysdba @database.sql
+
+echo "=== Active Sessions ==="
+sqlplus -s / as sysdba <<EOF
+SELECT status, COUNT(*) FROM v\$session GROUP BY status;
+EOF
+```
+
+### 2. RAC Ortamında Node Kontrolü
+
+RAC cluster'ında tüm node'ların çalıştığını doğrulayın:
+
+```bash
+#!/bin/bash
+# rac_check.sh
+
+# Beklenen node sayısı
+EXPECTED_NODES=2
+
+# Aktif node sayısı
+ACTUAL_NODES=$(sqlplus -s / as sysdba <<EOF
+SELECT COUNT(*) FROM gv\$instance WHERE status = 'OPEN';
+EOF
+)
+
+if [ $ACTUAL_NODES -ne $EXPECTED_NODES ]; then
+    echo "ALARM: $ACTUAL_NODES aktif node, beklenen: $EXPECTED_NODES"
+    mail -s "RAC Node Alarm" dba@company.com
+fi
+```
+
+### 3. Data Guard Senkronizasyon Kontrolü
+
+Primary ve standby veritabanlarının rollerini doğrulayın:
+
+```bash
+#!/bin/bash
+# dg_check.sh
+
+echo "=== Primary Database ==="
+sqlplus -s sys/password@primary @database.sql
+
+echo "=== Standby Database ==="
+sqlplus -s sys/password@standby @database.sql
+```
+
+### 4. Uptime Takibi
+
+Instance uptime'ını izleyerek planned/unplanned restart'ları tespit edin:
+
+```sql
+-- Son 7 günün uptime trendi
+SELECT TRUNC(startup_time) AS startup_date,
+       COUNT(*) AS restart_count
+FROM (
+    SELECT startup_time FROM gv$instance
+)
+WHERE startup_time > SYSDATE - 7
+GROUP BY TRUNC(startup_time)
+ORDER BY startup_date DESC;
+```
+
+## Troubleshooting
+
+### Sorun: OPEN_MODE = MOUNTED
+
+**Çözüm:**
+
+```sql
+-- Database'i açın
+ALTER DATABASE OPEN;
+```
+
+**Muhtemel nedenler:**
+- Veritabanı kapatılmamış properly
+- Control file sorunları
+- Datafile corruption
+- Recovery gerekiyor
+
+### Sorun: DATABASE_STATUS = SUSPENDED
+
+**Çözüm:**
+
+```sql
+-- Resume database
+ALTER SYSTEM RESUME;
+```
+
+### Sorun: DATABASE_ROLE Beklenmedik Değer
+
+**Çözüm:**
+
+Eğer PRIMARY beklerken PHYSICAL STANDBY görüyorsanız:
+1. Data Guard yapılandırmasını kontrol edin
+2. Switchover/failover işlemi yapılmış olabilir
+3. Broker veya monitoring tool ile durumu doğrulayın
+
+## Monitoring Entegrasyonu
+
+### Nagios Plugin
+
+```bash
+#!/bin/bash
+# check_db_health.sh
+
+STATUS=$(sqlplus -s / as sysdba <<EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT status FROM gv\$database WHERE ROWNUM = 1;
+EOF
+)
+
+if [ "$STATUS" != "ACTIVE" ]; then
+    echo "CRITICAL: Database status is $STATUS"
+    exit 2
+else
+    echo "OK: Database is ACTIVE"
+    exit 0
+fi
+```
+
+### Cron Job Örneği
+
+```bash
+# /etc/crontab
+
+# Her saat başı health check
+0 * * * * /u01/app/oracle/scripts/health_check.sh > /tmp/db_health.log 2>&1
+
+# Her sabah 8:'de e-mail raporu
+0 8 * * * /u01/app/oracle/scripts/morning_report.sh | mail -s "Morning DB Report" dba@company.com
+```
+
+## İlgili Görünümler
+
+- `GV$INSTANCE` - Tüm instance bilgileri (RAC)
+- `GV$DATABASE` - Tüm database bilgileri
+- `V$INSTANCE` - Mevcut instance bilgileri
+- `V$DATABASE` - Mevcut database bilgileri
+- `V$THREAD` - Thread bilgileri (RAC)
+
+## Best Practices
+
+### 1. Düzenli Monitoring
+
+- **Günlük**: Her sabah health check çalıştırın
+- **Saatlik**: Critical sistemlerde otomatik kontrol
+- **Anlık**: Monitoring sistemi ile entegrasyon
+
+### 2. Dokümantasyon
+
+- Beklenen normal durumları not edin
+- Her veritabanı için baseline oluşturun
+- Anomalileri hızlıca tespit edin
+
+### 3. Otomasyon
+
+- Health check'i cron job'a ekleyin
+- Anomalilerde otomatik e-mail gönderin
+- Dashboard ile görselleştirin
+
+## Kaynaklar
+
+- Oracle Database Administration Guide
+- Oracle RAC Administration Guide
+- Oracle Data Guard Concepts and Administration
+
+## Sonraki Adımlar
+
+Bu health check scripti ile şunları yapabilirsiniz:
+
+- Otomatik alarm sistemi
+- Uptime trend analizi
+- Capacity planning için baseline
+- Multi-database monitoring dashboard
+- SLA monitoring ve raporlama
+
+Database health check, DBA'nın en temel amaç en önemli görevlerinden biridir. Bu scripti günlük rutininizin bir parçası haline getirerek veritabanınızın sağlığını garanti altına alabilirsiniz.

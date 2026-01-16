@@ -1,0 +1,250 @@
+---
+title: "Oracle RMAN Sıkıştırılmış Yedekleme Stratejisi - Compressed Backup"
+description: "Oracle RMAN ile sıkıştırılmış yedekleme stratejisi oluşturma, disk alanı tasarrufu ve çoklu kanal kullanımı. Production ortamında en iyi practice uygulamaları."
+date: 2025-01-16
+category: "Oracle Backup & Recovery"
+tags: ["oracle", "rman", "backup", "compression", "database", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle RMAN Sıkıştırılmış Yedekleme Stratejisi
+
+Oracle veritabanlarında yedekleme işlemleri, veri güvenliği ve disaster senaryoları için kritik önem taşır. Bu yazıda, RMAN (Recovery Manager) kullanılarak **sıkıştırılmış yedekleme** stratejisinin nasıl oluşturulacağını, çoklu kanal (parallel channel) kullanımını ve production ortamında **best practice** uygulamalarını inceleyeceğiz.
+
+
+<!--truncate-->
+<Callout type="info" title="Önemli Bilgi">
+Sıkıştırılmış yedekler, disk alanından %50-80 tasarruf sağlar ancak CPU kullanımını artırır. CPU kaynaklarının yoğun olduğu dönemlerde yedekleme planlaması yapılmalıdır.
+</Callout>
+
+## Script'in Amacı
+
+Bu RMAN script'i aşağıdaki işlevleri yerine getirir:
+
+- **Compressed Backupset** kullanarak disk alanından tasarruf sağlar
+- **Parallel channels** ile yedekleme süresini optimize eder
+- **Database + Archivelog** birlikte yedekler
+- **Farklı senaryolar** için esnek backup konfigürasyonu sunar
+
+## Önkoşullar
+
+1. **Oracle Enterprise Edition** lisansı (Compression özelliği için)
+2. **Fast Recovery Area (FRA)** veya yeterli disk alanı
+3. **RMAN catalog** veya control file repository konfigürasyonu
+4. **Yedekleme dizininin** varlığı ve yazma izinleri
+
+## RMAN Script Kodları
+
+### Senaryo 1: 6 Kanallı Paralel Yedekleme (Production Önerisi)
+
+```rman
+run {
+  -- 6 adet disk kanalı oluştur - paralel işlem için
+  ALLOCATE CHANNEL d1 DEVICE TYPE DISK FORMAT = '/backup/TTVPN/diskbackup/%U';
+  ALLOCATE CHANNEL d2 DEVICE TYPE DISK FORMAT = '/backup/TTVPN/diskbackup/%U';
+  ALLOCATE CHANNEL d3 DEVICE TYPE DISK FORMAT = '/backup/TTVPN/diskbackup/%U';
+  ALLOCATE CHANNEL d4 DEVICE TYPE DISK FORMAT = '/backup/TTVPN/diskbackup/%U';
+  ALLOCATE CHANNEL d5 DEVICE TYPE DISK FORMAT = '/backup/TTVPN/diskbackup/%U';
+  ALLOCATE CHANNEL d6 DEVICE TYPE DISK FORMAT = '/backup/TTVPN/diskbackup/%U';
+
+  -- Sıkıştırılmış backupset ile database ve archivelog yedekle
+  BACKUP AS COMPRESSED BACKUPSET DATABASE PLUS ARCHIVELOG;
+}
+```
+
+### Senaryo 2: Farklı Backup Dizini
+
+```rman
+run {
+  -- Oracle veri dizininde yedek alma
+  ALLOCATE CHANNEL d1 DEVICE TYPE DISK FORMAT = '/oracle/oradata/diskbackup/%U';
+  ALLOCATE CHANNEL d2 DEVICE TYPE DISK FORMAT = '/oracle/oradata/diskbackup/%U';
+  ALLOCATE CHANNEL d3 DEVICE TYPE DISK FORMAT = '/oracle/oradata/diskbackup/%U';
+  ALLOCATE CHANNEL d4 DEVICE TYPE DISK FORMAT = '/oracle/oradata/diskbackup/%U';
+  ALLOCATE CHANNEL d5 DEVICE TYPE DISK FORMAT = '/oracle/oradata/diskbackup/%U';
+  ALLOCATE CHANNEL d6 DEVICE TYPE DISK FORMAT = '/oracle/oradata/diskbackup/%U';
+
+  BACKUP AS COMPRESSED BACKUPSET DATABASE PLUS ARCHIVELOG;
+}
+```
+
+### Senaryo 3: Incremental Level 0 Yedekleme
+
+```rman
+run {
+  -- Sabit isimli backup file oluştur
+  ALLOCATE CHANNEL d1 DEVICE TYPE DISK FORMAT = '/oracle/backup/FullbackupYedegi.rman';
+
+  -- Incremental level 0 - tam yedekleme
+  BACKUP INCREMENTAL LEVEL=0 DATABASE PLUS ARCHIVELOG;
+}
+```
+
+## Kullanım Senaryoları
+
+### 1. Günlük Full Yedekleme (Production)
+
+**Açıklama:** Her gece çalışan, tüm veritabanını ve archivelogları içeren yedekleme.
+
+**Avantajları:**
+- Hızlı recovery süresi
+- Basit restore prosedürü
+- Point-in-time recovery desteği
+
+**Dezavantajları:**
+- Daha fazla disk alanı gerektirir
+- Yedekleme süresi daha uzundur
+
+### 2. Incremental Yedekleme Stratejisi
+
+**Haftalık Level 0 + Günlük Level 1:**
+
+```bash
+# Pazar: Level 0 (Full Backup)
+# Pazartesi-Cumartesi: Level 1 (Incremental)
+```
+
+**Avantajları:**
+- Disk alanından tasarruf
+- Kısa yedekleme süreleri
+- Günlük değişikliklerin korunması
+
+### 3. Tape Backup Entegrasyonu
+
+Disk yedeklerin ardından tape'e kopyalama:
+
+```rman
+BACKUP BACKUPSET ALL DEVICE TYPE SBT;
+```
+
+## Çıktı Analizi
+
+### Başarılı Yedekleme Çıktısı
+
+```
+channel d1: starting compressed full datafile backup set
+channel d1: specifying datafile(s) in backup set
+including current SPFILE in backup set
+including current control file in backup set
+channel d1: finished piece p1 at timestamp
+piece handle=/backup/TTVPN/diskbackup/xxx tag=TAG20250116T120000 comment=NONE
+channel d1: backup set complete, elapsed time: 01:30:45
+```
+
+### Performans Metrikleri
+
+- **Throughput:** 50-100 GB/saat (donanıma bağlı)
+- **Compression Ratio:** 3:1 ile 5:1 arası
+- **CPU Utilization:** %15-25 artış
+
+<Callout type="warning" title="Uyarı">
+Production ortamında yedekleme işlemi öncesi mutlaka test edin. Yedek dosyalarının erişilebilirliğini ve recover edilebilirliğini doğrulayın.
+</Callout>
+
+## Best Practices
+
+### 1. Yedekleme Konfigürasyonu
+
+```rman
+-- Retention policy
+CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 7 DAYS;
+
+-- Parallelism ayarı
+CONFIGURE DEVICE TYPE DISK PARALLELISM 6 BACKUP TYPE TO COMPRESSED BACKUPSET;
+
+-- Optimization
+CONFIGURE BACKUP OPTIMIZATION ON;
+```
+
+### 2. Monitoring ve Alerting
+
+```sql
+-- Yedek başarısızlık kontrolü
+SELECT OPERATION, STATUS, START_TIME, END_TIME, INPUT_BYTES/1024/1024 INPUT_MB,
+       OUTPUT_BYTES/1024/1024 OUTPUT_MB
+FROM V$RMAN_STATUS
+WHERE START_TIME > SYSDATE-1
+ORDER BY START_TIME DESC;
+```
+
+### 3. Disk Alanı Yönetimi
+
+```bash
+# Eski yedekleri temizleme script
+find /backup -name "*.rman" -mtime +7 -delete
+```
+
+### 4. Yedekleme Schedule Önerisi
+
+- **Full Backup:** Pazar gece 02:00
+- **Incremental:** Pazartesi-Cumartesi 03:00
+- **Archivelog Backup:** Her 2 saatte bir
+- **Validation:** Ayda bir kontrol
+
+## Performans İpuçları
+
+### 1. Channel Sayısı Optimizasyonu
+
+```rman
+-- CPU count*0.8 kanal kullanılması önerilir
+-- 8 CPU'lu sistem için 6 kanal idealdir
+```
+
+### 2. I/O Dağıtımı
+
+```rman
+-- Farklı disklerden yedekleme
+ALLOCATE CHANNEL d1 DEVICE TYPE DISK FORMAT '/disk1/backup/%U';
+ALLOCATE CHANNEL d2 DEVICE TYPE DISK FORMAT '/disk2/backup/%U';
+```
+
+### 3. Network Backup İçin
+
+```rman
+-- NFS mount üzerinden yedekleme
+CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '/nfs/backup/%U'
+MAXPIECESIZE 2G;
+```
+
+## Troubleshooting
+
+### Yaygın Hatalar
+
+**ORA-19802: Cannot use disk without recovery area**
+
+```bash
+# Çözüm: DB_RECOVERY_FILE_DEST parametresini kontrol edin
+ALTER SYSTEM SET DB_RECOVERY_FILE_DEST_SIZE=500G SCOPE=BOTH;
+```
+
+**RMAN-03009: Command failed**
+
+```bash
+# Disk alanını kontrol edin
+df -h /backup
+# Eski yedekleri silin
+DELETE OBSOLETE;
+```
+
+## Restore ve Recovery
+
+### Full Restore Örneği
+
+```rman
+STARTUP NOMOUNT;
+RESTORE CONTROLFILE FROM AUTOBACKUP;
+ALTER DATABASE MOUNT;
+RESTORE DATABASE;
+RECOVER DATABASE;
+ALTER DATABASE OPEN;
+```
+
+## İlgili Kaynaklar
+
+- [Oracle RMAN Documentation](https://docs.oracle.com/en/database/oracle/oracle-database/)
+- [Backup and Recovery Best Practices](https://www.oracle.com/a/tech/docs/12c-rman-backup-recovery-best-practices.pdf)
+- [RMAN Compression Guide](https://docs.oracle.com/database/121/BRADV/rcmcncpt.htm)
+
+## Sonraki Adımlar
+
+Bu script ile ilgili deneyiminizi paylaşın veya sorularınızı yorum bölümüne yazın. Yedekleme stratejilerinin karşılaştırılması için diğer RMAN yazılarımızı inceleyebilirsiniz.

@@ -1,0 +1,110 @@
+---
+title: "Oracle Data Guard Physical Standby Kurulum Rehberi (RMAN Duplicate)"
+description: "Oracle 11g/12c/19c veritabanlarında RMAN 'Duplicate from Active Database' yöntemiyle adım adım Physical Standby kurulumu ve konfigürasyonu."
+date: 2026-01-16
+category: "Oracle Disaster Recovery"
+tags: ["oracle", "data guard", "physical standby", "rman duplicate", "disaster recovery", "dba"]
+author: "Oracle DBA Blog"
+---
+
+# Oracle Data Guard Physical Standby Kurulum Rehberi
+
+Oracle Data Guard, verilerinizin felaket durumlarına (disaster) karşı korunmasını sağlayan en stabil ve güvenilir çözümdür. Bu makalede, modern DBA'ların en çok tercih ettiği yöntem olan **RMAN Duplicate from Active Database** ile sıfırdan Physical Standby kurulumunu adım adım inceleyeceğiz.
+
+
+<!--truncate-->
+## Ön Koşullar
+
+- **Enterprise Edition:** Data Guard özelliği sadece Enterprise Edition'da mevcuttur.
+- **Archive Log Mode:** Primary veritabanı mutlaka ARCHIVELOG modunda olmalıdır.
+- **Network:** İki sunucu birbirine 1521 portu üzerinden erişebilmelidir.
+- **Disk:** Standby tarafında, Primary ile aynı boyutta (mümkünse aynı yapıda) disk alanı bulunmalıdır.
+
+## Adım 1: Primary Veritabanı Hazırlığı
+
+Primary veritabanında "Force Logging" aktif edilmeli ve log gönderimi için parametreler ayarlanmalıdır.
+
+```sql
+-- Force Logging aktif et
+ALTER DATABASE FORCE LOGGING;
+
+-- Data Guard konfigürasyonu
+ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=(PRIMDB,STBYDB)';
+ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE=STBYDB LGWR ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME=STBYDB';
+ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2=ENABLE;
+ALTER SYSTEM SET FAL_SERVER=STBYDB;
+ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO;
+```
+
+## Adım 2: Network Konfigürasyonu (TNSNames)
+
+Hem Primary hem Standby tarafında `$ORACLE_HOME/network/admin/tnsnames.ora` dosyasına her iki veritabanı da eklenmelidir.
+
+```bash
+PRIMDB = (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = prim-host)(PORT = 1521)) (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = PRIMDB)))
+STBYDB = (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = stby-host)(PORT = 1521)) (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = STBYDB)))
+```
+
+## Adım 3: Standby Tarafında Hazırlık
+
+1. **Password File:** Primary'deki password dosyasını (`orapwPRIMDB`) standby sunucusuna kopyalayın ve adını `orapwSTBYDB` olarak değiştirin.
+2. **Init.ora:** Minimal bir parametre dosyası oluşturun:
+   ```text
+   db_name=PRIMDB
+   db_unique_name=STBYDB
+   ```
+3. **Instance Start:** Standby instance'ı `NOMOUNT` modunda açın.
+   ```sql
+   STARTUP NOMOUNT;
+   ```
+
+## Adım 4: RMAN Duplicate İşlemi
+
+Bu adım asıl büyünün gerçekleştiği yerdir. Primary üzerinden Standby'ı klonlar.
+
+```bash
+rman target sys/password@PRIMDB auxiliary sys/password@STBYDB
+```
+
+```rman
+RUN {
+  ALLOCATE CHANNEL p1 TYPE DISK;
+  ALLOCATE AUXILIARY CHANNEL s1 TYPE DISK;
+  DUPLICATE TARGET DATABASE FOR STANDBY FROM ACTIVE DATABASE 
+    NOFILENAMECHECK
+    SPFILE
+    PARAMETER_VALUE_CONVERT 'PRIMDB','STBYDB'
+    SET DB_UNIQUE_NAME='STBYDB'
+    SET FAL_SERVER='PRIMDB'
+    SET LOG_ARCHIVE_CONFIG='DG_CONFIG=(PRIMDB,STBYDB)'
+    SET LOG_ARCHIVE_DEST_2='SERVICE=PRIMDB ASYNC VALID_FOR=(ONLINE_LOGFILE,PRIMARY_ROLE) DB_UNIQUE_NAME=PRIMDB';
+}
+```
+
+## Adım 5: Media Recovery'nin Başlatılması
+
+Kurulum bittikten sonra Standby veritabanında log uygulama (apply) işlemini başlatın:
+
+```sql
+ALTER DATABASE RECOVER MANAGED STANDBY DATABASE DISCONNECT FROM SESSION;
+```
+
+## Doğrulama (Monitoring)
+
+Logların sağlıklı gidip gitmediğini kontrol etmek için:
+
+```sql
+-- Standby tarafında son apply edilen sequence
+SELECT THREAD#, SEQUENCE#, TO_CHAR(NEXT_TIME, 'DD-MON HH24:MI:SS') AS APPLY_TIME
+FROM V$ARCHIVED_LOG
+WHERE APPLIED='YES'
+ORDER BY NEXT_TIME DESC;
+```
+
+<Callout type="success" title="Tebrikler!">
+Artık çalışan bir Physical Standby veritabanınız var. Bu yapı veritabanınızı donanım hataları, veri bozulmaları ve site kayıplarına karşı korur.
+</Callout>
+
+## Sonuç
+
+RMAN Duplicate yöntemi, backup transferiyle uğraşmadan "aktif" veritabanı üzerinden standby oluşturmanızı sağlar. Bu yöntem özellikle hızlı network bağlantısı olan ortamlarda kurumsal standarttır.
