@@ -7,8 +7,11 @@ const config = {
   title: 'Oracle DBA Guides',
   tagline: 'Technical documentation and guides for Oracle Database Administrators',
   favicon: 'img/favicon.ico',
-  url: 'https://oracle-dba-guides.example.com',
-  baseUrl: '/',
+  url: 'https://barisariburnu.github.io',
+  baseUrl: '/oracle-dba-guides/',
+  organizationName: 'barisariburnu',
+  projectName: 'oracle-dba-guides',
+  trailingSlash: false,
   onBrokenLinks: 'ignore',
   onBrokenMarkdownLinks: 'warn',
 
